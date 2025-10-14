@@ -1,0 +1,14 @@
+/* Import de ta police Google */
+@import url('https://fonts.googleapis.com/css2?family=Michroma&display=swap');
+
+/* Applique la police à tout le site */
+body {
+  font-family: "Michroma", sans-serif;
+  font-style: normal;
+  margin: 0;
+  padding: 0;
+  background-color: #0d0d0d;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

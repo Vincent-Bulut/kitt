@@ -19,7 +19,7 @@
     .header-kitt {
         background: linear-gradient(90deg, #0d0d0d, #1a1a1a);
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
-        padding: 15px 20px;
+        padding: 7px 15px;
         display: flex;
         align-items: center;
         justify-content: space-between;
