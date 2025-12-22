@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date, Float
 from sqlalchemy.orm import Mapped, relationship, DeclarativeBase
 from sqlalchemy.testing.schema import mapped_column
 
@@ -25,14 +25,20 @@ class Portfolio(Base):
     )
 
 
-class Referential(Base):
-    __tablename__ = "referential"
+class Assets(Base):
+    __tablename__ = "assets"
 
-    symbol: Mapped[str] = mapped_column(String(50), primary_key=True)
-    isin: Mapped[str] = mapped_column(String(12), unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    ticker: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    symbol: Mapped[str] = mapped_column(String, primary_key=True)
+    isin: Mapped[str] = mapped_column(String(12), nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    currency: Mapped[str] = mapped_column(String, nullable=False)
+    fees: Mapped[float] = mapped_column(Float, nullable=True)
+    asset_class: Mapped[str] = mapped_column(String, nullable=True)
+    geo_focus: Mapped[str] = mapped_column(String, nullable=True)
+    asset_category_lv1: Mapped[str] = mapped_column(String, nullable=True)
+    asset_category_lv2: Mapped[str] = mapped_column(String, nullable=True)
+    asset_category_lv3: Mapped[str] = mapped_column(String, nullable=True)
+    asset_category_lv4: Mapped[str] = mapped_column(String, nullable=True)
 
 
 class Positions(Base):
@@ -40,7 +46,7 @@ class Positions(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     portfolio_id: Mapped[int] = mapped_column(Integer, ForeignKey("portfolio.id"), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(50), ForeignKey("referential.symbol"), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), ForeignKey("assets.symbol"), nullable=False)
     qte: Mapped[int] = mapped_column(Integer, nullable=False)
 
     portfolio: Mapped["Portfolio"] = relationship(
@@ -48,8 +54,8 @@ class Positions(Base):
         back_populates="positions",
     )
 
-    product: Mapped["Referential"] = relationship(
-        "Referential",
+    product: Mapped["Assets"] = relationship(
+        "Assets",
         lazy="joined",
     )
 

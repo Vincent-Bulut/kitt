@@ -1,1 +1,4 @@
 .idea
+
+backend/alembic.ini
+backend/alembic
