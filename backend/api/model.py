@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date
 from sqlalchemy.orm import Mapped, relationship, DeclarativeBase
 from sqlalchemy.testing.schema import mapped_column
 
@@ -13,8 +13,8 @@ class Portfolio(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
-    start_date: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
-    end_date: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    start_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     manager_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
