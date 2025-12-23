@@ -1,4 +1,4 @@
-
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -8,10 +8,6 @@ from backend.api import schema
 from backend.api.database import get_db
 
 router = APIRouter(prefix='/admin', tags=['ADMIN'])
-
-@router.get("/")
-def say_hello():
-    return "Hello Admin!"
 
 @router.post("/portfolio")
 def create_portfolio(portfolio: schema.Portfolio, db: Session = Depends(get_db)):
@@ -112,6 +108,24 @@ def get_portfolio(
             )
         return portfolio
 
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        ) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        ) from e
+
+@router.get("/portfolios", response_model=List[schema.PortfolioRead])
+def get_all_portfolios(
+        db: Session = Depends(get_db)
+):
+    try:
+        portfolios = db.query(model.Portfolio).all()
+        return portfolios
     except SQLAlchemyError as e:
         raise HTTPException(
             status_code=400,

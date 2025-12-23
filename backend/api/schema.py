@@ -19,3 +19,10 @@ class Portfolio(BaseModel):
         if self.end_date is not None and self.end_date < self.start_date:
             raise ValueError("end_date doit être postérieure à start_date")
         return self
+
+class PortfolioRead(Portfolio):
+    id: int
+
+    model_config = {
+        "from_attributes": True
+    }
