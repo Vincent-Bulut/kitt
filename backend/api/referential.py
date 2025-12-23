@@ -17,6 +17,17 @@ router = APIRouter(prefix='/referential', tags=['REFERENTIAL'])
 def say_hello():
     return "Hello Referential!"
 
+@router.get("/assets")
+def list_assets(db: Session = Depends(get_db)):
+    """
+    Retrieves the list of all assets from the database.
+    """
+    try:
+        assets = db.query(model.Assets).all()
+        return assets
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=500, detail=f"Erreur de base de données : {str(e)}")
+
 @router.post("/upload-excel")
 async def upload_referential_excel(
     file: UploadFile = File(...),
