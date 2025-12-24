@@ -107,6 +107,8 @@
         <div class="meta">
           <span class="chip">{sortKey} · {sortDir}</span>
           <span class="chip">{selected ? `Selected #${selected.id}` : "No selection"}</span>
+
+          <a class="btnSmall" href="/portfolios/new">+ NEW</a>
         </div>
       </div>
 
@@ -622,6 +624,34 @@
     border-color: rgba(255, 0, 60, 0.18);
     color: rgba(255, 255, 255, 0.82);
   }
+
+  .btnSmall {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 0, 60, 0.28);
+  background: rgba(255, 0, 60, 0.10);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+  box-shadow:
+    inset 0 0 12px rgba(255, 0, 60, 0.10),
+    0 0 16px rgba(255, 0, 60, 0.10);
+  transition: transform 140ms ease, box-shadow 140ms ease, border 140ms ease;
+}
+
+.btnSmall:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 0, 60, 0.55);
+  box-shadow:
+    inset 0 0 14px rgba(255, 0, 60, 0.16),
+    0 0 20px rgba(255, 0, 60, 0.22);
+}
 
   /* Thin red scrollbar */
   .tableWrap::-webkit-scrollbar { height: 10px; width: 10px; }
