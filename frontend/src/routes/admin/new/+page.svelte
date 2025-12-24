@@ -1,12 +1,13 @@
-
 <script>
+  import { instance } from "$lib/axiosAPI.js";
+
   let isSubmitting = false;
   let error = "";
 
   let form = {
     name: "",
     start_date: "",
-    end_date: "",
+    end_date: "2100-12-31",
     manager_name: "",
     description: ""
   };
@@ -31,31 +32,17 @@
         description: form.description.trim() ? form.description.trim() : null
       };
 
-      // ✅ adapte l’URL selon ton backend (ex: /portfolio, /portfolios, /api/portfolio...)
-      const res = await fetch("/api/portfolios", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        let msg = "Unable to create portfolio.";
-        try {
-          const err = await res.json();
-          msg = err?.detail || err?.message || JSON.stringify(err);
-        } catch {
-          msg = await res.text();
-        }
-        error = msg || "Unable to create portfolio.";
-        return;
-      }
-
-      const created = await res.json();
+      const response = await instance.post("/admin/portfolio", payload);
+      const created = response.data;
 
       // Redirect back to list (or to the created portfolio page)
-      window.location.href = `/portfolios`; // ou `/portfolios/${created.id}`
-    } catch (e) {
-      error = e?.message ?? "Network error.";
+      window.location.href = `/admin`; // ou `/portfolios/${created?.id}`
+    } catch (err) {
+      error =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "Unable to create portfolio.";
     } finally {
       isSubmitting = false;
     }
@@ -74,7 +61,12 @@
       <div class="formGrid">
         <label class="field full">
           <span class="label">Name *</span>
-          <input class="input" type="text" bind:value={form.name} placeholder="e.g. Long-Term Core" />
+          <input
+            class="input"
+            type="text"
+            bind:value={form.name}
+            placeholder="e.g. Amundi STOXX Europe 600 Banks UCITS ETF Acc"
+          />
         </label>
 
         <label class="field">
@@ -103,7 +95,7 @@
       {/if}
 
       <div class="actions">
-        <a class="btn ghost" href="/portfolios">Cancel</a>
+        <a class="btn ghost" href="/admin">Cancel</a>
         <button class="btn" type="button" on:click={submit} disabled={isSubmitting}>
           {isSubmitting ? "Creating…" : "Create"}
         </button>

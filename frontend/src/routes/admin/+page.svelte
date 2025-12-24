@@ -7,7 +7,7 @@
 
   // Search + sort + selection
   let query = "";
-  let sortKey = "name";   // "name" | "start_date" | "end_date" | "manager_name"
+  let sortKey = "id";   // "name" | "start_date" | "end_date" | "manager_name"
   let sortDir = "asc";    // "asc" | "desc"
 
   let selectedId = null;
@@ -105,10 +105,9 @@
         </div>
 
         <div class="meta">
-          <span class="chip">{sortKey} · {sortDir}</span>
           <span class="chip">{selected ? `Selected #${selected.id}` : "No selection"}</span>
 
-          <a class="btnSmall" href="/portfolios/new">+ NEW</a>
+          <a class="btnSmall" href="/admin/new">+ NEW</a>
         </div>
       </div>
 
