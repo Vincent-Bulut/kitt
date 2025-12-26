@@ -229,7 +229,7 @@
 <style>
     /* Page */
     .page {
-        min-height: calc(100vh - 80px);
+        min-height: calc(90vh - 80px);
         padding: 12vh 20px 40px;
         display: flex;
         justify-content: center;
@@ -415,7 +415,7 @@
     /* Table */
     .tableWrap {
         padding: 14px;
-        max-height: 65vh;
+        max-height: 60vh;
         overflow-y: auto;
         overflow-x: auto;
     }
