@@ -10,6 +10,7 @@ from backend.api.database import SessionLocal, engine, get_db
 
 from backend.api.admin import router as admin_router
 from backend.api.referential import router as referential_router
+from backend.api.analytics import router as analytics_router
 
 model.Base.metadata.create_all(bind=engine)
 
@@ -26,6 +27,7 @@ api.add_middleware(
 
 api.include_router(admin_router)
 api.include_router(referential_router)
+api.include_router(analytics_router)
 
 @api.get("/")
 def say_hello():
