@@ -3,7 +3,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, Tuple
 
 import yfinance as yf
 from cachetools import TTLCache
@@ -66,6 +66,27 @@ class YahooReturnRequest(BaseModel):
     end_date: str    # YYYY-MM-DD
     auto_adjust: bool = True
 
+class CumReturnPoint(BaseModel):
+    date: str               # YYYY-MM-DD
+    cum_return: float       # decimal (e.g. 0.123 = +12.3%)
+
+class YahooCumReturnsSeries(BaseModel):
+    ticker: str
+    start_date_requested: str
+    end_date_requested: str
+    start_date_used: str
+    base_price: float
+    points: List[CumReturnPoint]
+
+class YahooCumReturnsResponse(BaseModel):
+    data: List[YahooCumReturnsSeries]
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+class YahooCumReturnsRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=200)  # séries => limite plus basse
+    start_date: str
+    end_date: str
+    auto_adjust: bool = True
 
 # =========================================================
 # Internal helpers
@@ -379,3 +400,183 @@ def yahoo_arithmetic_return_post(
 ):
     return _run_arithmetic_return(req.tickers, req.start_date, req.end_date, req.auto_adjust, format)
 
+def _download_prices_close(
+    tickers: List[str],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    auto_adjust: bool,
+) -> pd.DataFrame:
+    """
+    Télécharge les prix Close (auto_adjust => adj close économique) pour plusieurs tickers.
+    Retourne DataFrame index date, colonnes tickers.
+    """
+    fetch_start = (start_ts - pd.Timedelta(days=10)).date().isoformat()
+    fetch_end = (end_ts + pd.Timedelta(days=1)).date().isoformat()
+
+    df = yf.download(
+        tickers=tickers,
+        start=fetch_start,
+        end=fetch_end,
+        interval="1d",
+        auto_adjust=auto_adjust,
+        progress=False,
+        group_by="column",
+        threads=True,
+    )
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # yfinance multi-tickers: colonnes MultiIndex (Field, Ticker) ou (Ticker, Field) selon versions
+    # On essaie d'extraire "Close" de manière robuste.
+    if isinstance(df.columns, pd.MultiIndex):
+        # Cas le plus fréquent: niveau 0 = price field ("Close", "Open"...), niveau 1 = ticker
+        if "Close" in df.columns.get_level_values(0):
+            close = df["Close"]
+        # Autre cas: niveau 1 = field
+        elif "Close" in df.columns.get_level_values(1):
+            close = df.xs("Close", axis=1, level=1)
+        else:
+            raise ValueError("Could not find 'Close' in downloaded data")
+    else:
+        # Un seul ticker -> colonnes simples
+        if "Close" not in df.columns:
+            raise ValueError("Could not find 'Close' in downloaded data")
+        close = df[["Close"]]
+        close.columns = [tickers[0]]
+
+    close = close.dropna(how="all").copy()
+    close.index = pd.to_datetime(close.index).tz_localize(None)
+
+    # Tronque proprement la fenêtre demandée (on garde les dates <= end_ts)
+    close = close.loc[:end_ts]
+    return close
+
+
+def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
+    s = series.loc[:target].dropna()
+    if s.empty:
+        return None, None
+    price = float(s.iloc[-1].item()) if hasattr(s.iloc[-1], "item") else float(s.iloc[-1])
+    return price, s.index[-1]
+
+
+def cumulative_returns_series_from_prices(
+    prices: pd.Series,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp
+) -> Tuple[pd.Timestamp, float, pd.Series]:
+    """
+    Renvoie (start_used_date, base_price, cum_return_series_decimal)
+    cum_return_series est indexé par date, valeurs en décimal (0.10 = +10%).
+    """
+    s = prices.dropna().copy()
+    s.index = pd.to_datetime(s.index).tz_localize(None)
+    s = s.loc[:end_ts]
+
+    base_price, start_used = _nearest_prev_price(s, start_ts)
+    if base_price is None:
+        raise ValueError(f"No price data on or before {start_ts.date()}")
+
+    # Garder à partir du start_used (cohérence)
+    s2 = s.loc[start_used:]
+    if s2.empty:
+        raise ValueError("No prices after start_date_used")
+
+    cum = (s2 / base_price) - 1.0
+    return start_used, float(base_price), cum
+
+
+def _run_cum_returns(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    auto_adjust: bool,
+    format: str,
+):
+    start_ts = utils.convert_to_timestamp(start_date)
+    end_ts = utils.convert_to_timestamp(end_date)
+    if start_ts is None or end_ts is None:
+        raise ValueError("start_date and end_date must be valid dates (YYYY-MM-DD)")
+    if end_ts < start_ts:
+        raise ValueError("end_date must be >= start_date")
+
+    # Download multi-tickers once
+    close_df = _download_prices_close(tickers, start_ts, end_ts, auto_adjust=auto_adjust)
+    if close_df.empty:
+        raise ValueError("No data returned by Yahoo for requested tickers/date range")
+
+    data: List[dict] = []
+    errors: Dict[str, str] = {}
+
+    for ticker in tickers:
+        try:
+            if ticker not in close_df.columns:
+                raise ValueError("Ticker not present in downloaded data")
+
+            start_used, base_price, cum = cumulative_returns_series_from_prices(
+                close_df[ticker],
+                start_ts=start_ts,
+                end_ts=end_ts
+            )
+
+            points = [
+                {"date": d.strftime("%Y-%m-%d"), "cum_return": float(v)}
+                for d, v in cum.items()
+            ]
+
+            data.append({
+                "ticker": ticker,
+                "start_date_requested": start_ts.date().isoformat(),
+                "end_date_requested": end_ts.date().isoformat(),
+                "start_date_used": start_used.date().isoformat(),
+                "base_price": float(base_price),
+                "points": points
+            })
+        except Exception as e:
+            errors[ticker] = str(e)
+
+    if format == "csv":
+        # format long: date,ticker,cum_return
+        flat = []
+        for s in data:
+            for pt in s["points"]:
+                flat.append({"date": pt["date"], "ticker": s["ticker"], "cum_return": pt["cum_return"]})
+        df = pd.DataFrame(flat)
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=yahoo_cum_returns.csv"},
+        )
+
+    return {"data": data, "errors": errors}
+
+
+# =========================================================
+# Routes: cumulative returns series
+# =========================================================
+
+@router.get("/yahoo/cumulative-returns", response_model=YahooCumReturnsResponse)
+def yahoo_cumulative_returns_get(
+    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+    auto_adjust: bool = True,
+    format: str = Query("json", pattern="^(json|csv)$"),
+):
+    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        raise HTTPException(status_code=400, detail="tickers is required")
+
+    return _run_cum_returns(ticker_list, start_date, end_date, auto_adjust, format)
+
+
+@router.post("/yahoo/cumulative-returns", response_model=YahooCumReturnsResponse)
+def yahoo_cumulative_returns_post(
+    req: YahooCumReturnsRequest,
+    format: str = Query("json", pattern="^(json|csv)$"),
+):
+    return _run_cum_returns(req.tickers, req.start_date, req.end_date, req.auto_adjust, format)
