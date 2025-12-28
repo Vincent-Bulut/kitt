@@ -1,5 +1,6 @@
 import io
 import pandas as pd
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ ReturnType = Literal["ARITH"]
 
 # Cache 10 minutes (clé = ticker + asof + auto_adjust)
 CACHE = TTLCache(maxsize=5000, ttl=600)
+DRAWDOWN_CACHE = TTLCache(maxsize=2000, ttl=600)
 
 # =========================================================
 # Pydantic models
@@ -87,6 +89,46 @@ class YahooCumReturnsRequest(BaseModel):
     start_date: str
     end_date: str
     auto_adjust: bool = True
+
+class DrawdownMetrics(BaseModel):
+    observations: int
+    max_drawdown: float
+    current_drawdown: float
+    num_drawdown_episodes: int
+    avg_drawdown_length_trading_days: float
+    max_drawdown_length_trading_days: int
+    worst_episode_trough: float
+
+class DrawdownPath(BaseModel):
+    peak_date: str
+    trough_date: str
+    recovery_date: Optional[str]
+    max_drawdown: float
+
+class DrawdownPoint(BaseModel):
+    date: str
+    price: float
+    running_max: float
+    drawdown: float
+
+class YahooDrawdownRow(BaseModel):
+    ticker: str
+    start_date_requested: str
+    end_date_requested: str
+    metrics: DrawdownMetrics
+    path: DrawdownPath
+    series: Optional[List[DrawdownPoint]] = None
+
+class YahooDrawdownResponse(BaseModel):
+    data: List[YahooDrawdownRow]
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+class YahooDrawdownRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=200)
+    start_date: str
+    end_date: str
+    auto_adjust: bool = True
+    include_series: bool = False
 
 # =========================================================
 # Internal helpers
@@ -580,3 +622,196 @@ def yahoo_cumulative_returns_post(
     format: str = Query("json", pattern="^(json|csv)$"),
 ):
     return _run_cum_returns(req.tickers, req.start_date, req.end_date, req.auto_adjust, format)
+
+# =========================================================
+# Helpers
+# =========================================================
+
+def _download_close_multi(
+    tickers: List[str],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    auto_adjust: bool,
+) -> pd.DataFrame:
+    df = yf.download(
+        tickers=tickers,
+        start=(start_ts - pd.Timedelta(days=5)).date().isoformat(),
+        end=(end_ts + pd.Timedelta(days=1)).date().isoformat(),
+        interval="1d",
+        auto_adjust=auto_adjust,
+        progress=False,
+        threads=True,
+        group_by="column",
+    )
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        if "Close" in df.columns.get_level_values(0):
+            close = df["Close"]
+        elif "Close" in df.columns.get_level_values(1):
+            close = df.xs("Close", axis=1, level=1)
+        else:
+            raise ValueError("Could not find 'Close' in yfinance download")
+    else:
+        if "Close" not in df.columns:
+            raise ValueError("Could not find 'Close' in yfinance download")
+        close = df[["Close"]]
+        close.columns = [tickers[0]]
+
+    close = close.dropna(how="all").copy()
+    close.index = pd.to_datetime(close.index).tz_localize(None)
+    return close.loc[start_ts:end_ts]
+
+
+def _drawdown_series(prices: pd.Series) -> pd.DataFrame:
+    p = prices.dropna().copy()
+    p.index = pd.to_datetime(p.index).tz_localize(None)
+    rm = p.cummax()
+    dd = p / rm - 1.0
+    return pd.DataFrame({"Price": p, "RunningMax": rm, "Drawdown": dd})
+
+
+def _drawdown_metrics(prices: pd.Series) -> Dict[str, Any]:
+    dd_df = _drawdown_series(prices)
+    dd = dd_df["Drawdown"]
+
+    max_dd = float(dd.min())
+    current_dd = float(dd.iloc[-1].item())
+
+    in_dd = dd < 0
+    episode_id = (in_dd != in_dd.shift(1, fill_value=False)).cumsum()
+
+    durations = []
+    troughs = []
+    for _, block in dd_df[in_dd].groupby(episode_id[in_dd]):
+        durations.append(int(len(block)))
+        troughs.append(float(block["Drawdown"].min()))
+
+    return {
+        "observations": int(dd.dropna().shape[0]),
+        "max_drawdown": max_dd,
+        "current_drawdown": current_dd,
+        "num_drawdown_episodes": int(len(durations)),
+        "avg_drawdown_length_trading_days": float(np.mean(durations)) if durations else 0.0,
+        "max_drawdown_length_trading_days": int(max(durations)) if durations else 0,
+        "worst_episode_trough": float(min(troughs)) if troughs else 0.0,
+    }
+
+
+def _max_drawdown_path(prices: pd.Series) -> Dict[str, Any]:
+    dd_df = _drawdown_series(prices)
+    p = dd_df["Price"]
+    dd = dd_df["Drawdown"]
+
+    trough_dt = dd.idxmin()
+    trough_dd = float(dd.loc[trough_dt])
+
+    peak_dt = p.loc[:trough_dt].idxmax()
+    peak_price = float(p.loc[peak_dt].item())
+
+    after = p.loc[trough_dt:]
+    rec = after[after >= peak_price]
+    rec_dt = rec.index[0] if not rec.empty else None
+
+    return {
+        "peak_date": peak_dt.date().isoformat(),
+        "trough_date": trough_dt.date().isoformat(),
+        "recovery_date": None if rec_dt is None else rec_dt.date().isoformat(),
+        "max_drawdown": trough_dd,
+    }
+
+
+def _serialize_dd_series(dd_df: pd.DataFrame) -> List[Dict[str, Any]]:
+    out = []
+    for idx, row in dd_df.iterrows():
+        out.append({
+            "date": idx.date().isoformat(),
+            "price": float(row["Price"]),
+            "running_max": float(row["RunningMax"]),
+            "drawdown": float(row["Drawdown"]),
+        })
+    return out
+
+
+def _run_drawdown(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    auto_adjust: bool,
+    include_series: bool,
+) -> Dict[str, Any]:
+    start_ts = utils.convert_to_timestamp(start_date)
+    end_ts = utils.convert_to_timestamp(end_date)
+    if start_ts is None or end_ts is None:
+        raise ValueError("start_date and end_date must be valid dates (YYYY-MM-DD)")
+    if end_ts < start_ts:
+        raise ValueError("end_date must be >= start_date")
+
+    cache_key = ("dd_multi", tuple(tickers), start_date, end_date, auto_adjust, include_series)
+    if cache_key in DRAWDOWN_CACHE:
+        return DRAWDOWN_CACHE[cache_key]
+
+    close = _download_close_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    data = []
+    errors: Dict[str, str] = {}
+
+    for t in tickers:
+        try:
+            if t not in close.columns:
+                raise ValueError("Ticker not found in downloaded data")
+
+            s = close[t].dropna()
+            if s.empty or len(s) < 5:
+                raise ValueError("Not enough points in window")
+
+            metrics = _drawdown_metrics(s)
+            path = _max_drawdown_path(s)
+
+            row = {
+                "ticker": t,
+                "start_date_requested": start_ts.date().isoformat(),
+                "end_date_requested": end_ts.date().isoformat(),
+                "metrics": metrics,
+                "path": path,
+            }
+
+            if include_series:
+                dd_df = _drawdown_series(s)
+                row["series"] = _serialize_dd_series(dd_df)
+
+            data.append(row)
+
+        except Exception as e:
+            errors[t] = str(e)
+
+    out = {"data": data, "errors": errors}
+    DRAWDOWN_CACHE[cache_key] = out
+    return out
+
+
+# =========================================================
+# Routes
+# =========================================================
+
+@router.get("/yahoo/drawdowns", response_model=YahooDrawdownResponse)
+def yahoo_drawdowns_get(
+    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+    auto_adjust: bool = True,
+    include_series: bool = False,
+):
+    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        raise HTTPException(status_code=400, detail="tickers is required")
+
+    return _run_drawdown(ticker_list, start_date, end_date, auto_adjust, include_series)
+
+
+@router.post("/yahoo/drawdowns", response_model=YahooDrawdownResponse)
+def yahoo_drawdowns_post(req: YahooDrawdownRequest):
+    return _run_drawdown(req.tickers, req.start_date, req.end_date, req.auto_adjust, req.include_series)
