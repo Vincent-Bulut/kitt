@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any, Tuple
+from scipy.stats import norm
 
 import yfinance as yf
 from cachetools import TTLCache
@@ -40,6 +41,9 @@ _INTERVAL_MAP = {
     "weekly": "1wk",
     "monthly": "1mo",
 }
+
+RISK_CACHE = TTLCache(maxsize=2000, ttl=600)
+
 
 # =========================================================
 # Pydantic models
@@ -175,6 +179,42 @@ class YahooAnnVolRequest(BaseModel):
     auto_adjust: bool = True
     frequency: VolFrequency = "daily"
     return_mode: ReturnMode = "log"
+
+class VaREsPoint(BaseModel):
+    confidence_level: float
+    var_historical: float
+    es_historical: float
+    var_gaussian: float
+    es_gaussian: float
+    var_cornish_fisher: float
+    es_cf_empirical_tail: float
+
+
+class YahooVaREsRow(BaseModel):
+    ticker: str
+    start_date_requested: str
+    end_date_requested: str
+    start_date_used: str
+    end_date_used: str
+    observations: int
+    return_mode: ReturnMode
+    horizon: str = "1D"
+    price_type: str  # "Adjusted Close" or "Close"
+    points: List[VaREsPoint]
+
+
+class YahooVaREsResponse(BaseModel):
+    data: List[YahooVaREsRow]
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class YahooVaREsRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=200)
+    start_date: str
+    end_date: str
+    auto_adjust: bool = True
+    return_mode: ReturnMode = "arith"
+    confidence_levels: List[float] = Field(default_factory=lambda: [0.95, 0.99])
 
 # =========================================================
 # Internal helpers
@@ -1082,4 +1122,302 @@ def yahoo_annualized_volatility_post(req: YahooAnnVolRequest):
         auto_adjust=req.auto_adjust,
         frequency=req.frequency,
         return_mode=req.return_mode,
+    )
+
+# =========================
+# Helpers (download + dates)
+# =========================
+
+def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
+    s = series.loc[:target].dropna()
+    if s.empty:
+        return None, None
+    v = s.iloc[-1]
+    price = float(v.item()) if hasattr(v, "item") else float(v)
+    return price, s.index[-1]
+
+
+def _download_close_daily_multi(
+    tickers: List[str],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    auto_adjust: bool,
+) -> pd.DataFrame:
+    """
+    Daily close multi-tickers with BUFFER BEFORE start_ts.
+    IMPORTANT: slice only to end_ts, not start_ts.
+    """
+    fetch_start = (start_ts - pd.Timedelta(days=60)).date().isoformat()
+    fetch_end = (end_ts + pd.Timedelta(days=5)).date().isoformat()
+
+    df = yf.download(
+        tickers=tickers,
+        start=fetch_start,
+        end=fetch_end,
+        interval="1d",
+        auto_adjust=auto_adjust,
+        progress=False,
+        threads=True,
+        group_by="column",
+    )
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        if "Close" in df.columns.get_level_values(0):
+            close = df["Close"]
+        elif "Close" in df.columns.get_level_values(1):
+            close = df.xs("Close", axis=1, level=1)
+        else:
+            raise ValueError("Could not find 'Close' in yfinance download")
+    else:
+        if "Close" not in df.columns:
+            raise ValueError("Could not find 'Close' in yfinance download")
+        close = df[["Close"]]
+        close.columns = [tickers[0]]
+
+    close = close.dropna(how="all").copy()
+    close.index = pd.to_datetime(close.index).tz_localize(None)
+
+    return close.loc[:end_ts]
+
+# =========================
+# Risk math (VaR / ES)
+# =========================
+
+def _as_return_series(returns: pd.Series) -> pd.Series:
+    r = pd.to_numeric(returns, errors="coerce").dropna()
+    r = r.replace([np.inf, -np.inf], np.nan).dropna()
+    return r
+
+def var_historical(returns: pd.Series, alpha: float) -> float:
+    r = _as_return_series(returns).to_numpy()
+    if r.size == 0:
+        return 0.0
+    q = np.quantile(r, 1 - alpha)   # left tail threshold in return space
+    return float(-q)                # loss positive
+
+def es_historical(returns: pd.Series, alpha: float) -> float:
+    r = _as_return_series(returns).to_numpy()
+    if r.size == 0:
+        return 0.0
+    q = np.quantile(r, 1 - alpha)
+    tail = r[r <= q]
+    return float(-np.mean(tail)) if tail.size else 0.0
+
+def var_gaussian(returns: pd.Series, alpha: float) -> float:
+    r = _as_return_series(returns)
+    if r.empty or len(r) < 2:
+        return 0.0
+    mu = float(r.mean())
+    sigma = float(r.std(ddof=1))
+    if sigma == 0:
+        return 0.0
+    z_left = float(norm.ppf(1 - alpha))  # negative
+    var_return = mu + sigma * z_left
+    return float(-var_return)
+
+def es_gaussian(returns: pd.Series, alpha: float) -> float:
+    r = _as_return_series(returns)
+    if r.empty or len(r) < 2:
+        return 0.0
+    mu = float(r.mean())
+    sigma = float(r.std(ddof=1))
+    if sigma == 0:
+        return 0.0
+    z_left = float(norm.ppf(1 - alpha))
+    phi = float(norm.pdf(z_left))
+    es_return = mu - sigma * (phi / (1 - alpha))  # left-tail ES in return space
+    return float(-es_return)
+
+def var_cornish_fisher(returns: pd.Series, alpha: float) -> float:
+    """
+    Cornish-Fisher adjusted VaR under non-normality using skew/kurt.
+    VaR returned as positive loss.
+    """
+    r = _as_return_series(returns)
+    if r.empty or len(r) < 5:
+        return 0.0
+
+    mu = float(r.mean())
+    sigma = float(r.std(ddof=1))
+    if sigma == 0:
+        return 0.0
+
+    # sample skewness and excess kurtosis
+    s = float(r.skew())
+    k_excess = float(r.kurtosis())  # pandas = excess kurtosis by default
+
+    z = float(norm.ppf(1 - alpha))  # negative (left tail)
+    z2 = z * z
+    z3 = z2 * z
+
+    # Cornish-Fisher expansion
+    z_cf = (
+        z
+        + (1/6) * (z2 - 1) * s
+        + (1/24) * (z3 - 3*z) * k_excess
+        - (1/36) * (2*z3 - 5*z) * (s**2)
+    )
+
+    var_return = mu + sigma * z_cf
+    return float(-var_return)
+
+def es_cf_empirical_tail(returns: pd.Series, alpha: float) -> float:
+    """
+    Practical: CF VaR threshold, then empirical mean of returns <= threshold.
+    """
+    r = _as_return_series(returns).to_numpy()
+    if r.size == 0:
+        return 0.0
+
+    var_cf_loss = var_cornish_fisher(pd.Series(r), alpha)  # positive loss
+    threshold_return = -var_cf_loss                         # return threshold (negative)
+
+    tail = r[r <= threshold_return]
+    return float(-np.mean(tail)) if tail.size else 0.0
+
+def es_summary(returns: pd.Series, confidence_levels: List[float]) -> List[Dict[str, Any]]:
+    out = []
+    for alpha in confidence_levels:
+        out.append({
+            "confidence_level": float(alpha),
+            "var_historical": var_historical(returns, alpha),
+            "es_historical": es_historical(returns, alpha),
+            "var_gaussian": var_gaussian(returns, alpha),
+            "es_gaussian": es_gaussian(returns, alpha),
+            "var_cornish_fisher": var_cornish_fisher(returns, alpha),
+            "es_cf_empirical_tail": es_cf_empirical_tail(returns, alpha),
+        })
+    return out
+
+# =========================
+# Core runner
+# =========================
+
+def _run_var_es(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    auto_adjust: bool,
+    return_mode: ReturnMode,
+    confidence_levels: List[float],
+) -> Dict[str, Any]:
+    start_ts = utils.convert_to_timestamp(start_date)
+    end_ts = utils.convert_to_timestamp(end_date)
+    if start_ts is None or end_ts is None:
+        raise ValueError("start_date and end_date must be valid dates (YYYY-MM-DD)")
+    if end_ts < start_ts:
+        raise ValueError("end_date must be >= start_date")
+
+    # validate confidence levels
+    cls = []
+    for a in confidence_levels:
+        if not (0.5 < float(a) < 1.0):
+            raise ValueError("confidence_levels must be in (0.5, 1.0)")
+        cls.append(float(a))
+
+    cache_key = ("var_es", tuple(tickers), start_date, end_date, auto_adjust, return_mode, tuple(cls))
+    if cache_key in RISK_CACHE:
+        return RISK_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    data: List[dict] = []
+    errors: Dict[str, str] = {}
+
+    for t in tickers:
+        try:
+            if t not in close.columns:
+                raise ValueError("Ticker not found in downloaded data")
+
+            s = close[t].dropna()
+            if s.empty:
+                raise ValueError("No close prices for ticker in window")
+
+            # find start/end used (nearest <= requested)
+            _, start_used = _nearest_prev_price(s, start_ts)
+            if start_used is None:
+                raise ValueError(f"No price data on or before {start_ts.date()}")
+
+            _, end_used = _nearest_prev_price(s, end_ts)
+            if end_used is None:
+                raise ValueError(f"No price data on or before {end_ts.date()}")
+
+            window_prices = s.loc[start_used:end_used].dropna()
+            if len(window_prices) < 10:
+                raise ValueError("Not enough price points in window")
+
+            if return_mode == "log":
+                returns = np.log(window_prices).diff()
+            else:
+                returns = window_prices.pct_change()
+
+            returns = _as_return_series(returns)
+            if len(returns) < 10:
+                raise ValueError("Not enough returns to compute risk metrics")
+
+            points = es_summary(returns, cls)
+
+            data.append({
+                "ticker": t,
+                "start_date_requested": start_ts.date().isoformat(),
+                "end_date_requested": end_ts.date().isoformat(),
+                "start_date_used": start_used.date().isoformat(),
+                "end_date_used": end_used.date().isoformat(),
+                "observations": int(len(returns)),
+                "return_mode": return_mode,
+                "horizon": "1D",
+                "price_type": "Adjusted Close" if auto_adjust else "Close",
+                "points": points,
+            })
+
+        except Exception as e:
+            errors[t] = str(e)
+
+    out = {"data": data, "errors": errors}
+    RISK_CACHE[cache_key] = out
+    return out
+
+# =========================
+# Routes
+# =========================
+
+@router.get("/yahoo/var-es", response_model=YahooVaREsResponse)
+def yahoo_var_es_get(
+    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+    auto_adjust: bool = True,
+    return_mode: ReturnMode = Query("arith", description="arith|log"),
+    confidence_levels: str = Query("0.95,0.99", description="Comma-separated, e.g. 0.95,0.99"),
+):
+    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        raise HTTPException(status_code=400, detail="tickers is required")
+
+    cl_list = [float(x.strip()) for x in confidence_levels.split(",") if x.strip()]
+
+    return _run_var_es(
+        tickers=ticker_list,
+        start_date=start_date,
+        end_date=end_date,
+        auto_adjust=auto_adjust,
+        return_mode=return_mode,
+        confidence_levels=cl_list,
+    )
+
+
+@router.post("/yahoo/var-es", response_model=YahooVaREsResponse)
+def yahoo_var_es_post(req: YahooVaREsRequest):
+    return _run_var_es(
+        tickers=req.tickers,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        auto_adjust=req.auto_adjust,
+        return_mode=req.return_mode,
+        confidence_levels=req.confidence_levels,
     )
