@@ -24,6 +24,23 @@ ReturnType = Literal["ARITH"]
 CACHE = TTLCache(maxsize=5000, ttl=600)
 DRAWDOWN_CACHE = TTLCache(maxsize=2000, ttl=600)
 
+VolFrequency = Literal["daily", "weekly", "monthly"]
+ReturnMode = Literal["log", "arith"]
+
+ANNVOL_CACHE = TTLCache(maxsize=2000, ttl=600)
+
+_ANNUALIZATION = {
+    "daily": 252.0,
+    "weekly": 52.0,
+    "monthly": 12.0,
+}
+
+_INTERVAL_MAP = {
+    "daily": "1d",
+    "weekly": "1wk",
+    "monthly": "1mo",
+}
+
 # =========================================================
 # Pydantic models
 # =========================================================
@@ -129,6 +146,35 @@ class YahooDrawdownRequest(BaseModel):
     end_date: str
     auto_adjust: bool = True
     include_series: bool = False
+
+class YahooAnnVolRow(BaseModel):
+    ticker: str
+    start_date_requested: str
+    end_date_requested: str
+    start_date_used: str
+    end_date_used: str
+    observations: int
+
+    volatility_period: float          # std(returns) on the window (NOT annualized)
+    annualized_volatility: float      # volatility_period * sqrt(252/52/12)
+
+    frequency: VolFrequency
+    price_type: str                   # "Adjusted Close" or "Close"
+    return_mode: ReturnMode           # "log" or "arith"
+
+
+class YahooAnnVolResponse(BaseModel):
+    data: List[YahooAnnVolRow]
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class YahooAnnVolRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=200)
+    start_date: str
+    end_date: str
+    auto_adjust: bool = True
+    frequency: VolFrequency = "daily"
+    return_mode: ReturnMode = "log"
 
 # =========================================================
 # Internal helpers
@@ -815,3 +861,225 @@ def yahoo_drawdowns_get(
 @router.post("/yahoo/drawdowns", response_model=YahooDrawdownResponse)
 def yahoo_drawdowns_post(req: YahooDrawdownRequest):
     return _run_drawdown(req.tickers, req.start_date, req.end_date, req.auto_adjust, req.include_series)
+
+# =========================
+# Helpers
+# =========================
+
+def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
+    """
+    Returns (price, date) for the last available price <= target.
+    """
+    s = series.loc[:target].dropna()
+    if s.empty:
+        return None, None
+    v = s.iloc[-1]
+    price = float(v.item()) if hasattr(v, "item") else float(v)
+    return price, s.index[-1]
+
+
+def _download_close_multi_interval(
+    tickers: List[str],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    auto_adjust: bool,
+    frequency: VolFrequency,
+) -> pd.DataFrame:
+    """
+    Download Close series with BUFFER BEFORE start_ts.
+    IMPORTANT: Do NOT slice to start_ts, only to end_ts, otherwise nearest-prev-start fails
+    for non-trading start dates (weekends/holidays).
+    """
+    interval = _INTERVAL_MAP[frequency]
+
+    # buffer before start is key (weekly/monthly anchors + non-trading days)
+    fetch_start = (start_ts - pd.Timedelta(days=60)).date().isoformat()
+    fetch_end = (end_ts + pd.Timedelta(days=5)).date().isoformat()
+
+    df = yf.download(
+        tickers=tickers,
+        start=fetch_start,
+        end=fetch_end,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        progress=False,
+        threads=True,
+        group_by="column",
+    )
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Extract Close robustly (MultiIndex or single)
+    if isinstance(df.columns, pd.MultiIndex):
+        if "Close" in df.columns.get_level_values(0):
+            close = df["Close"]
+        elif "Close" in df.columns.get_level_values(1):
+            close = df.xs("Close", axis=1, level=1)
+        else:
+            raise ValueError("Could not find 'Close' in yfinance download")
+    else:
+        if "Close" not in df.columns:
+            raise ValueError("Could not find 'Close' in yfinance download")
+        close = df[["Close"]]
+        close.columns = [tickers[0]]
+
+    close = close.dropna(how="all").copy()
+    close.index = pd.to_datetime(close.index).tz_localize(None)
+
+    close = close.loc[:end_ts]
+    return close
+
+
+def _compute_vols(
+    prices: pd.Series,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    frequency: VolFrequency,
+    return_mode: ReturnMode,
+) -> Dict[str, Any]:
+    """
+    - Find start_used/end_used using nearest previous available price (<= requested dates)
+    - Compute returns inside [start_used, end_used]
+    - Compute BOTH:
+        * volatility_period (std of returns)
+        * annualized_volatility
+    """
+    s = prices.dropna().copy()
+    s.index = pd.to_datetime(s.index).tz_localize(None)
+
+    # anchor dates (nearest <= requested)
+    _, start_used = _nearest_prev_price(s, start_ts)
+    if start_used is None:
+        raise ValueError(f"No price data on or before {start_ts.date()}")
+
+    _, end_used = _nearest_prev_price(s, end_ts)
+    if end_used is None:
+        raise ValueError(f"No price data on or before {end_ts.date()}")
+
+    window = s.loc[start_used:end_used].dropna()
+    if len(window) < 3:
+        raise ValueError("Not enough price points in window")
+
+    if return_mode == "log":
+        rets = np.log(window).diff().dropna()
+    else:
+        rets = window.pct_change().dropna()
+
+    n = int(rets.shape[0])
+    if n < 2:
+        raise ValueError("Not enough returns to compute volatility")
+
+    vol_period = float(rets.std(ddof=1))
+    ann_factor = float(_ANNUALIZATION[frequency])
+    vol_ann = float(vol_period * np.sqrt(ann_factor))
+
+    return {
+        "start_used": start_used,
+        "end_used": end_used,
+        "observations": n,
+        "volatility_period": vol_period,
+        "annualized_volatility": vol_ann,
+    }
+
+
+def _run_annualized_volatility(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    auto_adjust: bool,
+    frequency: VolFrequency,
+    return_mode: ReturnMode,
+) -> Dict[str, Any]:
+    start_ts = utils.convert_to_timestamp(start_date)
+    end_ts = utils.convert_to_timestamp(end_date)
+
+    if start_ts is None or end_ts is None:
+        raise ValueError("start_date and end_date must be valid dates (YYYY-MM-DD)")
+    if end_ts < start_ts:
+        raise ValueError("end_date must be >= start_date")
+
+    cache_key = ("ann_vol", tuple(tickers), start_date, end_date, auto_adjust, frequency, return_mode)
+    if cache_key in ANNVOL_CACHE:
+        return ANNVOL_CACHE[cache_key]
+
+    close = _download_close_multi_interval(tickers, start_ts, end_ts, auto_adjust, frequency)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    data: List[dict] = []
+    errors: Dict[str, str] = {}
+
+    for t in tickers:
+        try:
+            if t not in close.columns:
+                raise ValueError("Ticker not found in downloaded data")
+
+            res = _compute_vols(
+                close[t],
+                start_ts=start_ts,
+                end_ts=end_ts,
+                frequency=frequency,
+                return_mode=return_mode,
+            )
+
+            data.append({
+                "ticker": t,
+                "start_date_requested": start_ts.date().isoformat(),
+                "end_date_requested": end_ts.date().isoformat(),
+                "start_date_used": res["start_used"].date().isoformat(),
+                "end_date_used": res["end_used"].date().isoformat(),
+                "observations": int(res["observations"]),
+
+                "volatility_period": float(res["volatility_period"]),
+                "annualized_volatility": float(res["annualized_volatility"]),
+
+                "frequency": frequency,
+                "price_type": "Adjusted Close" if auto_adjust else "Close",
+                "return_mode": return_mode,
+            })
+
+        except Exception as e:
+            errors[t] = str(e)
+
+    out = {"data": data, "errors": errors}
+    ANNVOL_CACHE[cache_key] = out
+    return out
+
+# =========================
+# Routes
+# =========================
+
+@router.get("/yahoo/annualized-volatility", response_model=YahooAnnVolResponse)
+def yahoo_annualized_volatility_get(
+    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+    auto_adjust: bool = True,
+    frequency: VolFrequency = Query("daily", description="daily|weekly|monthly"),
+    return_mode: ReturnMode = Query("log", description="log|arith"),
+):
+    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        raise HTTPException(status_code=400, detail="tickers is required")
+
+    return _run_annualized_volatility(
+        tickers=ticker_list,
+        start_date=start_date,
+        end_date=end_date,
+        auto_adjust=auto_adjust,
+        frequency=frequency,
+        return_mode=return_mode,
+    )
+
+
+@router.post("/yahoo/annualized-volatility", response_model=YahooAnnVolResponse)
+def yahoo_annualized_volatility_post(req: YahooAnnVolRequest):
+    return _run_annualized_volatility(
+        tickers=req.tickers,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        auto_adjust=req.auto_adjust,
+        frequency=req.frequency,
+        return_mode=req.return_mode,
+    )
