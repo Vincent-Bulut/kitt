@@ -10,7 +10,14 @@
                 <a href="/risk" class="dropdown-item">Risk</a>
             </div>
         </div>
-        <a href="/referential" class="tab">Referential</a>
+        <div class="tab dropdown">
+            <span class="dropdown-trigger">REFERENTIAL</span>
+            <div class="dropdown-menu">
+                <a href="/referential/yahoo" class="dropdown-item">Yahoo-Finance</a>
+                <a href="/referential/etfbook" class="dropdown-item">ETFbook</a>
+            </div>
+        </div>
+<!--        <a href="/referential" class="tab">Referential</a>-->
     </div>
     <a href="/admin" class="admin-tab">Admin</a>
 </nav>

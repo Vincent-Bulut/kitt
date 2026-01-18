@@ -3,3 +3,8 @@
 backend/alembic.ini
 backend/alembic
 backend/input
+
+.env
+
+# Jupyter notebooks
+*.ipynb
