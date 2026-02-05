@@ -46,6 +46,6 @@
 		"svelte"
 	],
 	"dependencies": {
-		"axios": "^1.13.2"
+		"axios": "^1.13.4"
 	}
 }
