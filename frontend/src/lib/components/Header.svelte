@@ -17,7 +17,8 @@
                 <a href="/referential/etfbook" class="dropdown-item">ETFbook</a>
             </div>
         </div>
-<!--        <a href="/referential" class="tab">Referential</a>-->
+        <a href="/analytics" class="tab analytics-tab">ANALYTICS</a>
+        <!--        <a href="/referential" class="tab">Referential</a>-->
     </div>
     <a href="/admin" class="admin-tab">Admin</a>
 </nav>
@@ -58,6 +59,7 @@
         display: flex;
         gap: 30px;
         flex-grow: 1;
+        align-items: center;
     }
 
     .tab {
@@ -79,6 +81,15 @@
         color: #fff;
         transform: scale(1.08);
         box-shadow: 0 0 10px rgba(255, 50, 50, 0.8);
+    }
+
+    .analytics-tab {
+        color: #ddd;
+        background: rgba(255, 51, 51, 0.06);
+    }
+
+    .analytics-tab:hover {
+        background: rgba(255, 51, 51, 0.12);
     }
 
     .admin-tab {
