@@ -34,16 +34,13 @@
             title: "VaR / ES",
             description: "Estimate historical, Gaussian, and Cornish-Fisher risk metrics.",
             href: "/analytics/var-es",
-            tag: "RISK"
+            tag: "YAHOO"
         }
     ];
 
     const chips = [
         "Multi-ticker",
-        "JSON + CSV",
         "KITT UI",
-        "Red scanline",
-        "FastAPI-backed"
     ];
 </script>
 
@@ -62,7 +59,7 @@
 
                 <div class="statusWrap">
                     <span class="status">LIVE</span>
-                    <span class="status soft">Yahoo / ETFbook</span>
+                    <span class="status soft">Yahoo</span>
                 </div>
             </div>
 
@@ -77,8 +74,7 @@
             <div class="heroPanel">
                 <div class="heroLabel">LANDING ZONE</div>
                 <p class="heroText">
-                    Choose an analytics module, submit your tickers and dates, then inspect results
-                    in the same dark terminal style used across the app.
+                    Choose an analytics module, submit your tickers and dates, then inspect results.
                 </p>
 
                 <div class="heroActions">
