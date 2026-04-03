@@ -83,10 +83,10 @@
         box-shadow: 0 0 10px rgba(255, 50, 50, 0.8);
     }
 
-    .analytics-tab {
-        color: #ddd;
-        background: rgba(255, 51, 51, 0.06);
-    }
+    /*.analytics-tab {*/
+    /*    color: #ddd;*/
+    /*    background: rgba(255, 51, 51, 0.06);*/
+    /*}*/
 
     .analytics-tab:hover {
         background: rgba(255, 51, 51, 0.12);
