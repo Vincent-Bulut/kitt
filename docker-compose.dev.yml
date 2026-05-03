@@ -1,15 +1,17 @@
+name: kitt-dev
+
 services:
   postgres:
-    image: postgres:latest
+    image: postgres:17
     container_name: kitt_dev_postgres
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: commando
       POSTGRES_DB: kitt
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_dev:/var/lib/postgresql/data
 
   pgadmin:
     image: dpage/pgadmin4
@@ -18,13 +20,13 @@ services:
       PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
-      - "8080:80"
+      - "8081:80"
     depends_on:
       - postgres
     volumes:
-      - pgadmin-data:/var/lib/pgadmin
+      - pgadmin-data-dev:/var/lib/pgadmin
 
 
 volumes:
-  postgres_data:
-  pgadmin-data:
+  postgres_data_dev:
+  pgadmin-data-dev:

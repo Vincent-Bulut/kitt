@@ -1,0 +1,82 @@
+name: kitt-prod
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: kitt_postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: commando
+      POSTGRES_DB: kitt
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck: # Vérification de l'état pour s'assurer que PostgreSQL est prêt
+      test: [ "CMD-SHELL", "pg_isready -U admin -d kitt" ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: kitt_pgadmin_container
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+
+  api:
+    build:
+      context: ./
+      dockerfile: backend/Dockerfile
+    container_name: kitt_api_container
+    expose:
+      - 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    environment: # Configuration de l'API avec la base de données
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: kitt
+      DATABASE_USER: admin
+      DATABASE_PASSWORD: commando
+      ENV_KITT: prod
+
+  webapp:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    container_name: kitt_frontend_container
+    expose:
+      - 5173
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+    environment:
+      BROWSER: "none"
+
+  nginx:
+    image: nginx:latest
+    container_name: kitt_nginx_container
+    expose:
+      - 5700
+    ports:
+      - "80:5700"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - webapp
+
+volumes:
+  postgres_data:
+  pgadmin-data:
