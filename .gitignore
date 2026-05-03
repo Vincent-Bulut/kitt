@@ -1,5 +1,9 @@
 .idea
 
+docker-compose.yml
+docker-compose.dev.yml
+backend/.env
+
 backend/alembic.ini
 backend/alembic
 backend/input
