@@ -10,7 +10,7 @@ from scipy.stats import norm
 import yfinance as yf
 from cachetools import TTLCache
 
-import utils
+from backend.api import utils
 
 router = APIRouter(prefix='/analytics', tags=['ANALYTICS'])
 

@@ -5,7 +5,7 @@ import os
 if os.environ.get("ENV_KITT") == 'prod':
     SQLALCHEMY_DATABASE_URL = "postgresql://admin:commando@postgres:5432/kitt"
 else:
-    SQLALCHEMY_DATABASE_URL = "postgresql://admin:commando@localhost/kitt"
+    SQLALCHEMY_DATABASE_URL = "postgresql://admin:commando@localhost:5433/kitt"
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
