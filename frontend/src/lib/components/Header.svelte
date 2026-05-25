@@ -10,6 +10,7 @@
                 <a href="/risk" class="dropdown-item">Risk</a>
             </div>
         </div>
+        <a href="/transactions" class="tab">TRANSACTIONS</a>
         <div class="tab dropdown">
             <span class="dropdown-trigger">REFERENTIAL</span>
             <div class="dropdown-menu">
