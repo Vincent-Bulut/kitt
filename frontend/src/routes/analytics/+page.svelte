@@ -78,6 +78,7 @@
                 </p>
 
                 <div class="heroActions">
+                    <a class="btn primary" href="/analytics/all">View all in one page →</a>
                     <a class="btn" href="/analytics/perf">Open Performance</a>
                     <a class="btn ghost" href="/analytics/var-es">Open VaR / ES</a>
                 </div>
@@ -281,6 +282,23 @@
         background: rgba(255, 0, 60, 0.06);
         border-color: rgba(255, 0, 60, 0.18);
         color: rgba(255, 255, 255, 0.82);
+    }
+
+    .btn.primary {
+        background: linear-gradient(180deg, rgba(255, 0, 60, 0.32), rgba(255, 0, 60, 0.18));
+        border-color: rgba(255, 0, 60, 0.55);
+        color: rgba(255, 255, 255, 0.98);
+        box-shadow:
+                inset 0 0 14px rgba(255, 0, 60, 0.22),
+                0 0 22px rgba(255, 0, 60, 0.26);
+        font-weight: 600;
+    }
+
+    .btn.primary:hover {
+        border-color: rgba(255, 0, 60, 0.75);
+        box-shadow:
+                inset 0 0 18px rgba(255, 0, 60, 0.30),
+                0 0 28px rgba(255, 0, 60, 0.36);
     }
 
     .grid {
