@@ -14,7 +14,6 @@
             <span class="dropdown-trigger">REFERENTIAL</span>
             <div class="dropdown-menu">
                 <a href="/referential/yahoo" class="dropdown-item">Yahoo-Finance</a>
-                <a href="/referential/etfbook" class="dropdown-item">ETFbook</a>
             </div>
         </div>
         <a href="/analytics" class="tab analytics-tab">ANALYTICS</a>
