@@ -1,5 +1,7 @@
 <script lang="ts">
     import { instance } from "$lib/axiosAPI.js";
+    import { page } from "$app/stores";
+    import { onMount } from "svelte";
 
     type PerfRow = {
         ticker: string;
@@ -294,6 +296,13 @@
 
     $: arithMaxAbs = arithRows.length ? Math.max(...arithRows.map((r) => Math.abs(r.arithmetic_return))) : 0.0001;
     $: volMax = volRows.length ? Math.max(...volRows.map((r) => r.annualized_volatility)) : 0.0001;
+
+    onMount(() => {
+        const fromUrl = $page.url.searchParams.get("tickers");
+        if (fromUrl && fromUrl.trim()) {
+            form.tickers = fromUrl.trim();
+        }
+    });
 </script>
 
 <div class="page">

@@ -1,5 +1,6 @@
 <script>
     import {instance} from "$lib/axiosAPI.js";
+    import {goto} from "$app/navigation";
 
     export let data;
 
@@ -8,6 +9,46 @@
 
     // Search
     let query = "";
+
+    // Selection — keyed by asset.symbol (the ticker analytics expects)
+    let selected = new Set();
+
+    function toggleOne(symbol) {
+        if (!symbol) return;
+        if (selected.has(symbol)) selected.delete(symbol);
+        else selected.add(symbol);
+        selected = selected; // trigger reactivity
+    }
+
+    function clearSelection() {
+        selected = new Set();
+    }
+
+    $: filteredSymbols = filteredAssets
+        .map((a) => a?.symbol)
+        .filter(Boolean);
+
+    $: visibleSelectedCount = filteredSymbols.filter((s) => selected.has(s)).length;
+    $: allVisibleSelected =
+        filteredSymbols.length > 0 &&
+        visibleSelectedCount === filteredSymbols.length;
+    $: someVisibleSelected =
+        visibleSelectedCount > 0 && visibleSelectedCount < filteredSymbols.length;
+
+    function toggleAllVisible() {
+        if (allVisibleSelected) {
+            for (const s of filteredSymbols) selected.delete(s);
+        } else {
+            for (const s of filteredSymbols) selected.add(s);
+        }
+        selected = selected;
+    }
+
+    function openAnalytics() {
+        if (selected.size === 0) return;
+        const tickers = Array.from(selected).join(",");
+        goto(`/analytics/all?tickers=${encodeURIComponent(tickers)}`);
+    }
 
     // Live filtered assets
     $: q = query.trim().toLowerCase();
@@ -198,6 +239,17 @@
             <table class="kittTable">
                 <thead>
                 <tr>
+                    <th class="checkCol">
+                        <input
+                                type="checkbox"
+                                class="rowCheckbox"
+                                aria-label="Select all visible"
+                                checked={allVisibleSelected}
+                                indeterminate={someVisibleSelected}
+                                on:change={toggleAllVisible}
+                                disabled={filteredSymbols.length === 0}
+                        />
+                    </th>
                     <th>ISIN</th>
                     <th>NAME</th>
                     <th>CURRENCY</th>
@@ -208,11 +260,21 @@
                 <tbody>
                 {#if filteredAssets.length === 0}
                     <tr>
-                        <td class="empty" colspan="4">No assets found</td>
+                        <td class="empty" colspan="5">No assets found</td>
                     </tr>
                 {:else}
                     {#each filteredAssets as asset}
-                        <tr>
+                        <tr class:rowSelected={asset.symbol && selected.has(asset.symbol)}>
+                            <td class="checkCol">
+                                <input
+                                        type="checkbox"
+                                        class="rowCheckbox"
+                                        aria-label={`Select ${asset.symbol ?? asset.isin}`}
+                                        checked={asset.symbol ? selected.has(asset.symbol) : false}
+                                        disabled={!asset.symbol}
+                                        on:change={() => toggleOne(asset.symbol)}
+                                />
+                            </td>
                             <td><span class="mono">{asset.isin}</span></td>
                             <td>{asset.name}</td>
                             <td><span class="mono">{asset.currency}</span></td>
@@ -224,6 +286,22 @@
             </table>
         </div>
     </div>
+
+    {#if selected.size > 0}
+        <div class="selectionBar" role="region" aria-label="Selection actions">
+            <div class="selectionInfo">
+                <span class="selectionCount mono">{selected.size}</span>
+                <span class="selectionLabel">selected</span>
+                <span class="selectionPreview mono">{Array.from(selected).slice(0, 4).join(", ")}{selected.size > 4 ? `, +${selected.size - 4}` : ""}</span>
+            </div>
+            <div class="selectionActions">
+                <button class="btn ghost" type="button" on:click={clearSelection}>Clear</button>
+                <button class="btn primary" type="button" on:click={openAnalytics}>
+                    View analytics →
+                </button>
+            </div>
+        </div>
+    {/if}
 </div>
 
 <style>
@@ -232,7 +310,8 @@
         min-height: calc(90vh - 80px);
         padding: 12vh 20px 40px;
         display: flex;
-        justify-content: center;
+        flex-direction: column;
+        align-items: center;
         background: radial-gradient(1200px 600px at 50% 20%, rgba(255, 0, 60, 0.12), transparent 60%),
         linear-gradient(180deg, #07080c, #04040a);
     }
@@ -512,5 +591,190 @@
 
     .tableWrap::-webkit-scrollbar-track {
         background: rgba(0, 0, 0, 0.25);
+    }
+
+    /* Checkbox column */
+    .checkCol {
+        width: 44px;
+        text-align: center !important;
+        padding-left: 14px !important;
+        padding-right: 8px !important;
+    }
+
+    .rowCheckbox {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 0, 60, 0.45);
+        background: rgba(255, 0, 60, 0.06);
+        box-shadow: inset 0 0 8px rgba(255, 0, 60, 0.12);
+        cursor: pointer;
+        position: relative;
+        transition: border 120ms ease, background 120ms ease, box-shadow 120ms ease;
+    }
+
+    .rowCheckbox:hover:not(:disabled) {
+        border-color: rgba(255, 0, 60, 0.85);
+        box-shadow: inset 0 0 10px rgba(255, 0, 60, 0.18), 0 0 8px rgba(255, 0, 60, 0.18);
+    }
+
+    .rowCheckbox:checked {
+        background: linear-gradient(180deg, rgba(255, 0, 60, 0.55), rgba(255, 0, 60, 0.30));
+        border-color: rgba(255, 0, 60, 0.85);
+        box-shadow: inset 0 0 8px rgba(255, 0, 60, 0.30), 0 0 10px rgba(255, 0, 60, 0.25);
+    }
+
+    .rowCheckbox:checked::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 5px;
+        width: 5px;
+        height: 9px;
+        border-right: 2px solid #fff;
+        border-bottom: 2px solid #fff;
+        transform: rotate(45deg);
+    }
+
+    .rowCheckbox:indeterminate {
+        background: linear-gradient(180deg, rgba(255, 0, 60, 0.40), rgba(255, 0, 60, 0.20));
+        border-color: rgba(255, 0, 60, 0.85);
+    }
+
+    .rowCheckbox:indeterminate::after {
+        content: "";
+        position: absolute;
+        top: 7px;
+        left: 3px;
+        right: 3px;
+        height: 2px;
+        background: #fff;
+        border-radius: 1px;
+    }
+
+    .rowCheckbox:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+    }
+
+    .kittTable tbody tr.rowSelected {
+        background: rgba(255, 0, 60, 0.10);
+        box-shadow: inset 0 0 0 1px rgba(255, 0, 60, 0.28);
+    }
+
+    .kittTable tbody tr.rowSelected td {
+        color: rgba(255, 255, 255, 0.95);
+    }
+
+    /* Floating selection bar */
+    .selectionBar {
+        position: sticky;
+        bottom: 16px;
+        margin-top: 14px;
+        align-self: center;
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        padding: 12px 16px;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 0, 60, 0.40);
+        background: linear-gradient(180deg, rgba(20, 10, 18, 0.96), rgba(10, 6, 12, 0.96));
+        box-shadow:
+                0 0 0 1px rgba(255, 0, 60, 0.10),
+                0 12px 36px rgba(0, 0, 0, 0.6),
+                0 0 26px rgba(255, 0, 60, 0.22);
+        backdrop-filter: blur(8px);
+        z-index: 10;
+        width: min(1200px, 100%);
+    }
+
+    .selectionInfo {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        flex-wrap: wrap;
+        min-width: 0;
+    }
+
+    .selectionCount {
+        font-size: 18px;
+        color: rgba(255, 0, 60, 0.98);
+        text-shadow: 0 0 12px rgba(255, 0, 60, 0.40);
+        letter-spacing: 0.04em;
+    }
+
+    .selectionLabel {
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: rgba(235, 235, 245, 0.70);
+    }
+
+    .selectionPreview {
+        font-size: 12px;
+        color: rgba(235, 235, 245, 0.55);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 360px;
+    }
+
+    .selectionActions {
+        display: flex;
+        gap: 10px;
+        flex-shrink: 0;
+    }
+
+    .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 0, 60, 0.28);
+        background: rgba(255, 0, 60, 0.10);
+        color: rgba(255, 255, 255, 0.90);
+        font-size: 13px;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        box-shadow: inset 0 0 12px rgba(255, 0, 60, 0.10), 0 0 14px rgba(255, 0, 60, 0.10);
+        transition: transform 140ms ease, border 140ms ease, box-shadow 140ms ease;
+    }
+
+    .btn:hover {
+        transform: translateY(-1px);
+        border-color: rgba(255, 0, 60, 0.55);
+    }
+
+    .btn.ghost {
+        background: rgba(255, 255, 255, 0.02);
+        border-color: rgba(255, 255, 255, 0.10);
+        color: rgba(235, 235, 245, 0.75);
+        box-shadow: none;
+    }
+
+    .btn.ghost:hover {
+        border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .btn.primary {
+        background: linear-gradient(180deg, rgba(255, 0, 60, 0.40), rgba(255, 0, 60, 0.22));
+        border-color: rgba(255, 0, 60, 0.65);
+        color: rgba(255, 255, 255, 0.98);
+        box-shadow:
+                inset 0 0 14px rgba(255, 0, 60, 0.26),
+                0 0 22px rgba(255, 0, 60, 0.30);
+        font-weight: 600;
+    }
+
+    .btn.primary:hover {
+        border-color: rgba(255, 0, 60, 0.85);
+        box-shadow:
+                inset 0 0 18px rgba(255, 0, 60, 0.34),
+                0 0 28px rgba(255, 0, 60, 0.42);
     }
 </style>
