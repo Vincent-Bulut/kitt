@@ -515,18 +515,21 @@
 
 <style>
     .page {
-        min-height: calc(100vh - 80px);
-        padding: 12vh 20px 40px;
+        min-height: 100vh;
+        padding: 16px;
         display: flex;
         justify-content: center;
+        align-items: flex-start;
         background:
                 radial-gradient(1200px 600px at 50% 20%, rgba(255, 0, 60, 0.12), transparent 60%),
                 linear-gradient(180deg, #07080c, #04040a);
         color: rgba(255, 255, 255, 0.9);
+        box-sizing: border-box;
     }
 
     .card {
         width: min(1500px, 100%);
+        max-height: calc(100vh - 32px);
         border-radius: 16px;
         background: linear-gradient(180deg, rgba(10, 10, 18, 0.92), rgba(6, 6, 12, 0.92));
         border: 1px solid rgba(255, 0, 60, 0.22);
@@ -536,41 +539,117 @@
                 0 0 30px rgba(255, 0, 60, 0.08);
         overflow: hidden;
         position: relative;
+        display: flex;
+        flex-direction: column;
     }
 
     .scanline {
-        position: absolute; inset: 0; pointer-events: none;
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
         background: linear-gradient(180deg, transparent, rgba(255, 0, 60, 0.08), transparent);
-        height: 120px; transform: translateY(-120px);
-        animation: scan 4.5s linear infinite; opacity: 0.75;
+        height: 120px;
+        transform: translateY(-120px);
+        animation: scan 4.5s linear infinite;
+        opacity: 0.75;
     }
-    @keyframes scan { 0% { transform: translateY(-120px); } 100% { transform: translateY(320px); } }
+
+    @keyframes scan {
+        0% {
+            transform: translateY(-120px);
+        }
+
+        100% {
+            transform: translateY(320px);
+        }
+    }
 
     .header {
-        padding: 18px 20px 16px;
+        padding: 14px 16px 12px;
         border-bottom: 1px solid rgba(255, 0, 60, 0.16);
         background:
                 linear-gradient(90deg, rgba(255, 0, 60, 0.10), transparent 60%),
                 linear-gradient(180deg, rgba(255, 0, 60, 0.06), transparent 70%);
+        flex-shrink: 0;
     }
-    .headerTop { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
-    .title { margin: 0; font-size: 14px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 0, 60, 0.95); text-shadow: 0 0 12px rgba(255, 0, 60, 0.35); }
-    .subtitle { margin-top: 6px; font-size: 12px; color: rgba(235, 235, 245, 0.65); }
-    .statusWrap { display: flex; gap: 8px; flex-wrap: wrap; }
-    .status, .chip { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(255, 0, 60, 0.22); background: rgba(255, 0, 60, 0.10); padding: 5px 10px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
-    .status.soft { background: rgba(255, 0, 60, 0.06); color: rgba(255, 255, 255, 0.74); }
-    .chipRow { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
-    .chip { color: rgba(235, 235, 245, 0.72); background: rgba(255, 0, 60, 0.07); }
 
-    .body { padding: 16px; display: grid; gap: 16px; }
+    .headerTop {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        flex-wrap: wrap;
+    }
+
+    .title {
+        margin: 0;
+        font-size: 14px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(255, 0, 60, 0.95);
+        text-shadow: 0 0 12px rgba(255, 0, 60, 0.35);
+    }
+
+    .subtitle {
+        margin-top: 6px;
+        font-size: 12px;
+        color: rgba(235, 235, 245, 0.65);
+    }
+
+    .statusWrap {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .status,
+    .chip {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 0, 60, 0.22);
+        background: rgba(255, 0, 60, 0.10);
+        padding: 5px 10px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .status.soft {
+        background: rgba(255, 0, 60, 0.06);
+        color: rgba(255, 255, 255, 0.74);
+    }
+
+    .chipRow {
+        margin-top: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .chip {
+        color: rgba(235, 235, 245, 0.72);
+        background: rgba(255, 0, 60, 0.07);
+    }
+
+    .body {
+        padding: 12px;
+        display: grid;
+        gap: 12px;
+        overflow: auto;
+        min-height: 0;
+    }
 
     .topBar {
         display: flex;
-        gap: 12px;
+        gap: 10px;
         align-items: flex-end;
         flex-wrap: wrap;
     }
-    .topBar .field { min-width: 240px; flex: 1 1 240px; }
+
+    .topBar .field {
+        min-width: 240px;
+        flex: 1 1 240px;
+    }
 
     .viewSwitch {
         display: inline-flex;
@@ -580,19 +659,25 @@
         overflow: hidden;
         background: rgba(0, 0, 0, 0.22);
     }
+
     .switchBtn {
         appearance: none;
         background: transparent;
         border: none;
         color: rgba(235, 235, 245, 0.72);
-        padding: 10px 16px;
-        font-size: 12px;
+        padding: 8px 12px;
+        font-size: 11px;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         cursor: pointer;
         transition: background 140ms ease, color 140ms ease;
     }
-    .switchBtn:hover { color: rgba(255, 255, 255, 0.95); background: rgba(255, 0, 60, 0.06); }
+
+    .switchBtn:hover {
+        color: rgba(255, 255, 255, 0.95);
+        background: rgba(255, 0, 60, 0.06);
+    }
+
     .switchBtn.active {
         background: linear-gradient(180deg, rgba(255, 0, 60, 0.35), rgba(255, 0, 60, 0.18));
         color: rgba(255, 255, 255, 0.98);
@@ -603,8 +688,9 @@
         border-radius: 14px;
         border: 1px solid rgba(255, 0, 60, 0.18);
         background: rgba(0, 0, 0, 0.22);
-        padding: 12px 16px;
+        padding: 10px 12px;
     }
+
     .formCard summary {
         list-style: none;
         cursor: pointer;
@@ -612,83 +698,148 @@
         display: flex;
         align-items: center;
     }
-    .formCard summary::-webkit-details-marker { display: none; }
+
+    .formCard summary::-webkit-details-marker {
+        display: none;
+    }
+
     .formCard summary::before {
         content: "▸";
         margin-right: 10px;
         transition: transform 140ms ease;
         color: rgba(255, 0, 60, 0.85);
     }
-    .formCard[open] summary::before { transform: rotate(90deg); }
+
+    .formCard[open] summary::before {
+        transform: rotate(90deg);
+    }
 
     .panelLabel {
-        font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
-        color: rgba(255, 0, 60, 0.95); text-shadow: 0 0 12px rgba(255, 0, 60, 0.25);
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: rgba(255, 0, 60, 0.95);
+        text-shadow: 0 0 12px rgba(255, 0, 60, 0.25);
     }
-    .moduleHint { font-size: 11px; color: rgba(235, 235, 245, 0.48); font-family: ui-monospace, monospace; }
+
+    .moduleHint {
+        font-size: 11px;
+        color: rgba(235, 235, 245, 0.48);
+        font-family: ui-monospace, monospace;
+    }
 
     .modulePanel {
         border-radius: 14px;
         border: 1px solid rgba(255, 0, 60, 0.18);
         background: rgba(0, 0, 0, 0.22);
-        padding: 16px;
+        padding: 12px;
+        min-width: 0;
     }
+
     .moduleHead {
         display: flex;
         justify-content: space-between;
         align-items: baseline;
         gap: 10px;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
     }
 
     .formGrid {
-        margin-top: 12px;
+        margin-top: 10px;
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
+        gap: 10px;
     }
-    @media (max-width: 1100px) { .formGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (max-width: 600px) { .formGrid { grid-template-columns: 1fr; } }
 
-    .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-    .label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(235, 235, 245, 0.58); }
+    @media (max-width: 1100px) {
+        .formGrid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 600px) {
+        .formGrid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 0;
+    }
+
+    .label {
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: rgba(235, 235, 245, 0.58);
+    }
+
     .input {
         border-radius: 12px;
         border: 1px solid rgba(255, 0, 60, 0.22);
         background: rgba(255, 0, 60, 0.06);
         color: rgba(255, 255, 255, 0.9);
-        padding: 10px 12px;
+        padding: 8px 10px;
         outline: none;
         width: 100%;
         box-shadow: inset 0 0 12px rgba(255, 0, 60, 0.10);
+        box-sizing: border-box;
     }
-    .input:focus { border-color: rgba(255, 0, 60, 0.55); }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
-    .actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 10px; }
+    .input:focus {
+        border-color: rgba(255, 0, 60, 0.55);
+    }
+
+    .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .actions {
+        margin-top: 14px;
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+    }
 
     .btn {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        padding: 10px 14px;
+        padding: 8px 12px;
         border-radius: 12px;
         border: 1px solid rgba(255, 0, 60, 0.28);
         background: rgba(255, 0, 60, 0.10);
         color: rgba(255, 255, 255, 0.90);
-        font-size: 13px;
+        font-size: 12px;
         cursor: pointer;
         transition: transform 140ms ease, border 140ms ease;
     }
-    .btn:hover { transform: translateY(-1px); border-color: rgba(255, 0, 60, 0.55); }
-    .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .btn:hover {
+        transform: translateY(-1px);
+        border-color: rgba(255, 0, 60, 0.55);
+    }
+
+    .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+        transform: none;
+    }
 
     .btn.ghost {
         background: rgba(255, 255, 255, 0.02);
         border-color: rgba(255, 255, 255, 0.10);
         color: rgba(235, 235, 245, 0.75);
     }
-    .btn.ghost:hover { border-color: rgba(255, 255, 255, 0.25); }
+
+    .btn.ghost:hover {
+        border-color: rgba(255, 255, 255, 0.25);
+    }
+
     .btn.primary {
         background: linear-gradient(180deg, rgba(255, 0, 60, 0.40), rgba(255, 0, 60, 0.22));
         border-color: rgba(255, 0, 60, 0.65);
@@ -696,76 +847,131 @@
         box-shadow: inset 0 0 14px rgba(255, 0, 60, 0.26), 0 0 22px rgba(255, 0, 60, 0.30);
         font-weight: 600;
     }
-    .btn.xsmall { padding: 6px 10px; font-size: 11px; }
 
-    .errorBox, .okBox {
-        margin-top: 12px; padding: 10px 12px; border-radius: 12px;
-        font-size: 13px; line-height: 1.4;
+    .btn.xsmall {
+        padding: 6px 10px;
+        font-size: 11px;
     }
+
+    .errorBox,
+    .okBox {
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
     .errorBox {
-        border: 1px solid rgba(255, 0, 60, 0.30); background: rgba(255, 0, 60, 0.10);
+        border: 1px solid rgba(255, 0, 60, 0.30);
+        background: rgba(255, 0, 60, 0.10);
         color: rgba(255, 230, 235, 0.95);
     }
+
     .okBox {
-        border: 1px solid rgba(34, 197, 94, 0.30); background: rgba(34, 197, 94, 0.10);
+        border: 1px solid rgba(34, 197, 94, 0.30);
+        background: rgba(34, 197, 94, 0.10);
         color: rgba(200, 255, 220, 0.95);
     }
 
     .kpiRow {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
-        margin-bottom: 14px;
+        gap: 8px;
+        margin-bottom: 10px;
     }
-    @media (max-width: 1100px) { .kpiRow { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (max-width: 600px) { .kpiRow { grid-template-columns: 1fr; } }
+
+    @media (max-width: 1100px) {
+        .kpiRow {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 600px) {
+        .kpiRow {
+            grid-template-columns: 1fr;
+        }
+    }
 
     .kpiCard {
         border: 1px solid rgba(255, 0, 60, 0.14);
         background: rgba(255, 0, 60, 0.04);
         border-radius: 12px;
-        padding: 10px 12px;
+        padding: 8px 10px;
         min-width: 0;
     }
+
     .kpiK {
-        font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
         color: rgba(235, 235, 245, 0.55);
         margin-bottom: 4px;
     }
-    .kpiV { font-size: 15px; color: rgba(255, 255, 255, 0.92); }
+
+    .kpiV {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.92);
+    }
 
     .tableWrap {
         overflow: auto;
         border-radius: 12px;
         border: 1px solid rgba(255, 0, 60, 0.12);
-        max-height: 65vh;
+        max-height: 48vh;
+        max-width: 100%;
     }
+
     .kittTable {
-        width: max-content; min-width: 100%;
-        border-collapse: separate; border-spacing: 0;
+        width: 100%;
+        min-width: 980px;
+        border-collapse: separate;
+        border-spacing: 0;
         background: rgba(0, 0, 0, 0.25);
+        table-layout: auto;
     }
+
     .kittTable thead th {
-        text-align: left; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+        text-align: left;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
         color: rgba(255, 255, 255, 0.85);
         background: linear-gradient(180deg, rgba(255, 0, 60, 0.18), rgba(255, 0, 60, 0.06));
-        padding: 12px 14px; border-bottom: 1px solid rgba(255, 0, 60, 0.16);
-        position: sticky; top: 0; z-index: 1; white-space: nowrap;
+        padding: 8px 10px;
+        border-bottom: 1px solid rgba(255, 0, 60, 0.16);
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        white-space: nowrap;
     }
+
     .kittTable tbody td {
-        padding: 10px 14px; font-size: 13px; color: rgba(235, 235, 245, 0.85);
-        border-bottom: 1px solid rgba(255, 0, 60, 0.08); white-space: nowrap;
+        padding: 7px 10px;
+        font-size: 12px;
+        color: rgba(235, 235, 245, 0.85);
+        border-bottom: 1px solid rgba(255, 0, 60, 0.08);
+        white-space: nowrap;
     }
+
     .nameCell {
-        max-width: 240px;
+        max-width: 160px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
 
-    .greenText { color: rgba(34, 197, 94, 0.96); }
-    .redText { color: rgba(255, 80, 100, 0.96); }
-    .soft { color: rgba(235, 235, 245, 0.55); }
+    .greenText {
+        color: rgba(34, 197, 94, 0.96);
+    }
+
+    .redText {
+        color: rgba(255, 80, 100, 0.96);
+    }
+
+    .soft {
+        color: rgba(235, 235, 245, 0.55);
+    }
 
     .sidePill {
         display: inline-block;
@@ -775,11 +981,13 @@
         letter-spacing: 0.08em;
         font-family: ui-monospace, monospace;
     }
+
     .sidePill.buy {
         background: rgba(34, 197, 94, 0.16);
         color: rgba(180, 255, 200, 0.95);
         border: 1px solid rgba(34, 197, 94, 0.30);
     }
+
     .sidePill.sell {
         background: rgba(255, 0, 60, 0.16);
         color: rgba(255, 210, 220, 0.95);
@@ -790,5 +998,49 @@
         color: rgba(235, 235, 245, 0.55);
         padding: 12px 4px;
         font-size: 13px;
+    }
+
+    @media (max-width: 800px) {
+        .page {
+            padding: 8px;
+        }
+
+        .card {
+            max-height: calc(100vh - 16px);
+            border-radius: 12px;
+        }
+
+        .header {
+            padding: 12px;
+        }
+
+        .body {
+            padding: 10px;
+            gap: 10px;
+        }
+
+        .topBar,
+        .viewSwitch,
+        .btn.ghost {
+            width: 100%;
+        }
+
+        .viewSwitch {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+        }
+
+        .switchBtn,
+        .btn {
+            width: 100%;
+        }
+
+        .tableWrap {
+            max-height: 42vh;
+        }
+
+        .kittTable {
+            min-width: 860px;
+        }
     }
 </style>

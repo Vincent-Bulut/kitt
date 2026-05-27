@@ -1,5 +1,6 @@
 import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date, Float
+import enum
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date, Float, Enum, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, relationship, DeclarativeBase
 from sqlalchemy.testing.schema import mapped_column
 
@@ -7,6 +8,12 @@ from backend.api.database import engine
 
 class Base(DeclarativeBase):
     pass
+
+
+class TransactionSide(str, enum.Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
 
 class Portfolio(Base):
     __tablename__ = "portfolio"
@@ -22,6 +29,13 @@ class Portfolio(Base):
         "Positions",
         back_populates="portfolio",
         cascade="all, delete-orphan",
+    )
+
+    transactions: Mapped[list["Transaction"]] = relationship(
+        "Transaction",
+        back_populates="portfolio",
+        cascade="all, delete-orphan",
+        order_by="Transaction.date",
     )
 
 
@@ -43,11 +57,17 @@ class Assets(Base):
 
 class Positions(Base):
     __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "symbol", name="uq_positions_portfolio_symbol"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    portfolio_id: Mapped[int] = mapped_column(Integer, ForeignKey("portfolio.id"), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(50), ForeignKey("assets.symbol"), nullable=False)
-    qte: Mapped[int] = mapped_column(Integer, nullable=False)
+    portfolio_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("portfolio.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    symbol: Mapped[str] = mapped_column(
+        String(50), ForeignKey("assets.symbol"), nullable=False, index=True
+    )
 
     portfolio: Mapped["Portfolio"] = relationship(
         "Portfolio",
@@ -58,6 +78,42 @@ class Positions(Base):
         "Assets",
         lazy="joined",
     )
+
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    __table_args__ = (
+        Index("ix_transactions_portfolio_symbol_date", "portfolio_id", "symbol", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    portfolio_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("portfolio.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    symbol: Mapped[str] = mapped_column(
+        String(50), ForeignKey("assets.symbol"), nullable=False, index=True
+    )
+
+    date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    side: Mapped[TransactionSide] = mapped_column(
+        Enum(TransactionSide, name="transaction_side"), nullable=False
+    )
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    transaction_fee: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+
+    portfolio: Mapped["Portfolio"] = relationship(
+        "Portfolio",
+        back_populates="transactions",
+    )
+
+    asset: Mapped["Assets"] = relationship(
+        "Assets",
+        lazy="joined",
+    )
+
 
 if __name__ == '__main__':
     Base.metadata.create_all(engine)
