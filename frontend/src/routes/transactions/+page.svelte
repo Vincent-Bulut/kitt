@@ -519,7 +519,7 @@
         padding: 16px;
         display: flex;
         justify-content: center;
-        align-items: flex-start;
+        align-items: center;
         background:
                 radial-gradient(1200px 600px at 50% 20%, rgba(255, 0, 60, 0.12), transparent 60%),
                 linear-gradient(180deg, #07080c, #04040a);
