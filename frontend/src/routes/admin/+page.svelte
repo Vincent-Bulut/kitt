@@ -244,24 +244,11 @@
                             <div class="k">Description</div>
                             <div class="v">{selected.description ?? "—"}</div>
                         </div>
-
-                        <div class="kv full">
-                            <div class="k">Positions</div>
-                            <div class="v">
-                <span class="muted">
-                  positions: {Array.isArray(selected.positions) ? selected.positions.length : "—"}
-                </span>
-                                <div class="muted small">
-                                    (Tu peux brancher un “View positions” qui navigue vers /portfolios/{selected.id})
-                                </div>
-                            </div>
-                        </div>
                     </div>
 
                     <div class="actions">
                         <!-- Remplace href selon ton routing -->
-                        <a class="btn" href={`/portfolios/${selected.id}`}>Open</a>
-                        <a class="btn ghost" href={`/portfolios/${selected.id}/positions`}>Positions</a>
+                        <a class="btn" href={`/portfolio?id=${selected.id}`}>Positions</a>
                     </div>
                 {/if}
             </aside>

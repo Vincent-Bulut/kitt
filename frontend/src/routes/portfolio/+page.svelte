@@ -1,6 +1,7 @@
 <script lang="ts">
     import { instance } from "$lib/axiosAPI.js";
     import { onMount } from "svelte";
+    import { page } from "$app/stores";
 
     type Portfolio = { id: number; name: string };
     type Asset = { symbol: string; name: string; isin: string; currency: string };
@@ -216,6 +217,11 @@
     }
 
     onMount(async () => {
+        const idFromUrl = $page.url.searchParams.get("id");
+        if (idFromUrl) {
+            const parsed = parseInt(idFromUrl, 10);
+            if (Number.isFinite(parsed)) selectedPortfolioId = parsed;
+        }
         await Promise.all([loadPortfolios(), loadAssets()]);
         if (selectedPortfolioId !== null) await loadData();
     });
@@ -232,21 +238,18 @@
         <header class="header">
             <div class="headerTop">
                 <div>
-                    <h1 class="title">TRANSACTIONS COCKPIT</h1>
+                    <h1 class="title">POSITIONS COCKPIT</h1>
                     <div class="subtitle">
                         Log new trades, browse history and inspect derived positions per portfolio.
                     </div>
                 </div>
                 <div class="statusWrap">
-                    <span class="status">WAC</span>
                     <span class="status soft">Yahoo prices</span>
                 </div>
             </div>
             <div class="chipRow">
                 <span class="chip">Buy / Sell</span>
-                <span class="chip">Auto P&amp;L</span>
                 <span class="chip">Weights</span>
-                <span class="chip">TER</span>
             </div>
         </header>
 
