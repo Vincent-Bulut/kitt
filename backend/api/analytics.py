@@ -44,6 +44,14 @@ _INTERVAL_MAP = {
 
 RISK_CACHE = TTLCache(maxsize=2000, ttl=600)
 
+MC_CACHE = TTLCache(maxsize=500, ttl=600)
+
+_PERIOD_DAYS = {
+    "1M": 30, "3M": 90, "6M": 180,
+    "1Y": 365, "2Y": 730, "3Y": 1095,
+    "5Y": 1825, "10Y": 3650,
+}
+
 
 # =========================================================
 # Pydantic models
@@ -231,6 +239,53 @@ class YahooAllMetricsResponse(BaseModel):
     dd: Optional[YahooDrawdownResponse] = None
     risk: Optional[YahooVaREsResponse] = None
     cum_returns: Optional[YahooCumReturnsResponse] = None
+
+
+class MonteCarloPercentiles(BaseModel):
+    p5: List[float]
+    p25: List[float]
+    p50: List[float]
+    p75: List[float]
+    p95: List[float]
+
+
+class MonteCarloStats(BaseModel):
+    n_simulations: int
+    horizon_days: int
+    lookback_start: str
+    lookback_end: str
+    initial_value: float
+    expected_final: float
+    p5_final: float
+    p25_final: float
+    p50_final: float
+    p75_final: float
+    p95_final: float
+    annualized_drift: float
+    annualized_volatility: float
+    prob_positive: float
+
+
+class MonteCarloResponse(BaseModel):
+    dates: List[str]
+    percentiles: MonteCarloPercentiles
+    samples: List[List[float]]
+    stats: MonteCarloStats
+    tickers: List[str]
+    weights: List[float]
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class MonteCarloRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=100)
+    weights: List[float] = Field(min_length=1, max_length=100)
+    horizon_days: int = Field(default=252, ge=10, le=2520)
+    n_simulations: int = Field(default=1000, ge=50, le=20000)
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    seed: int = 42
+    n_sample_paths: int = Field(default=30, ge=0, le=200)
+    initial_value: float = Field(default=1.0, gt=0)
 
 
 class YahooAllMetricsRequest(BaseModel):
@@ -1547,3 +1602,208 @@ def yahoo_all_metrics_post(req: YahooAllMetricsRequest):
         risk=YahooVaREsResponse(**risk_data),
         cum_returns=YahooCumReturnsResponse(**cum_returns_data)
     )
+
+
+# =========================
+# Monte Carlo simulation
+# =========================
+
+def _business_dates_forward(start: pd.Timestamp, n_steps: int) -> List[str]:
+    """Returns n_steps+1 business-day dates starting from `start` inclusive."""
+    idx = pd.bdate_range(start=start, periods=n_steps + 1)
+    return [d.date().isoformat() for d in idx]
+
+
+def _simulate_gbm_paths(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    weights: np.ndarray,
+    horizon: int,
+    n_sims: int,
+    seed: int,
+    initial_value: float,
+) -> np.ndarray:
+    """
+    Multivariate GBM. mu and cov are DAILY log-return parameters.
+    Returns: portfolio paths array, shape (n_sims, horizon + 1).
+    """
+    n_assets = len(mu)
+    # Jitter on the diagonal for Cholesky numerical stability
+    jitter = 1e-10 * np.eye(n_assets)
+    try:
+        L = np.linalg.cholesky(cov + jitter)
+    except np.linalg.LinAlgError:
+        # Fallback: eigen-decomposition with clipped negative eigenvalues
+        w, V = np.linalg.eigh(cov)
+        w = np.clip(w, 1e-12, None)
+        L = V @ np.diag(np.sqrt(w))
+
+    rng = np.random.default_rng(seed)
+    # Drift correction term (Ito): mu - 0.5 * diag(cov)
+    drift = mu - 0.5 * np.diag(cov)
+
+    # Z ~ standard normal: (n_sims, horizon, n_assets)
+    Z = rng.standard_normal((n_sims, horizon, n_assets))
+    # Correlated shocks via Cholesky
+    correlated = Z @ L.T  # (n_sims, horizon, n_assets)
+    # Daily log-returns per asset, per path
+    log_rets = drift + correlated  # broadcasts drift over (sims, horizon)
+    # Cumulative log-returns -> asset prices (normalized to 1 at t=0)
+    cum_log_rets = np.cumsum(log_rets, axis=1)
+    asset_paths = np.exp(cum_log_rets)  # (n_sims, horizon, n_assets)
+    # Portfolio value at each step = weighted sum of asset prices (initial portfolio = 1)
+    portfolio_paths = asset_paths @ weights  # (n_sims, horizon)
+    # Prepend initial value (t=0)
+    initial_col = np.ones((n_sims, 1))
+    portfolio_paths = np.concatenate([initial_col, portfolio_paths], axis=1)
+    return portfolio_paths * float(initial_value)
+
+
+def _run_monte_carlo(
+    tickers: List[str],
+    weights: List[float],
+    horizon_days: int,
+    n_simulations: int,
+    lookback_period: str,
+    auto_adjust: bool,
+    seed: int,
+    n_sample_paths: int,
+    initial_value: float,
+) -> Dict[str, Any]:
+    if len(tickers) != len(weights):
+        raise ValueError("tickers and weights must have the same length")
+
+    w_arr = np.array(weights, dtype=float)
+    if np.any(w_arr < 0):
+        raise ValueError("weights must be non-negative")
+    w_sum = w_arr.sum()
+    if w_sum <= 0:
+        raise ValueError("sum of weights must be > 0")
+    w_arr = w_arr / w_sum  # normalize
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    cache_key = (
+        "mc",
+        tuple(tickers),
+        tuple(round(float(x), 6) for x in w_arr.tolist()),
+        horizon_days,
+        n_simulations,
+        lookback_period,
+        auto_adjust,
+        seed,
+        n_sample_paths,
+        round(float(initial_value), 6),
+        end_ts.date().isoformat(),
+    )
+    if cache_key in MC_CACHE:
+        return MC_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    # Keep tickers that actually downloaded; drop weight components for missing tickers
+    available = [t for t in tickers if t in close.columns]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    if not available:
+        raise ValueError("No tickers available in downloaded data")
+
+    keep_mask = np.array([t in close.columns for t in tickers])
+    w_kept = w_arr[keep_mask]
+    w_kept = w_kept / w_kept.sum()  # re-normalize after dropping missing
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 30:
+        raise ValueError("Not enough historical price observations (need >= 30)")
+
+    log_rets = np.log(prices / prices.shift(1)).dropna()
+    if len(log_rets) < 20:
+        raise ValueError("Not enough log-return observations")
+
+    mu = log_rets.mean().to_numpy()           # daily mean log-returns
+    cov = log_rets.cov().to_numpy()           # daily covariance matrix
+
+    paths = _simulate_gbm_paths(
+        mu=mu,
+        cov=cov,
+        weights=w_kept,
+        horizon=horizon_days,
+        n_sims=n_simulations,
+        seed=seed,
+        initial_value=initial_value,
+    )
+
+    pcts = np.percentile(paths, [5, 25, 50, 75, 95], axis=0)
+    p5, p25, p50, p75, p95 = pcts[0], pcts[1], pcts[2], pcts[3], pcts[4]
+
+    # Sample a few representative paths to draw on top of the fan chart
+    rng = np.random.default_rng(seed + 1)
+    n_samples = min(n_sample_paths, n_simulations)
+    sample_idx = rng.choice(n_simulations, size=n_samples, replace=False) if n_samples > 0 else []
+    samples = paths[sample_idx].tolist() if n_samples > 0 else []
+
+    dates = _business_dates_forward(end_ts, horizon_days)
+
+    # Portfolio-level annualized drift / vol from estimated params (sanity stats)
+    port_daily_mu = float(np.dot(w_kept, mu))
+    port_daily_var = float(w_kept @ cov @ w_kept)
+    ann_drift = port_daily_mu * 252.0
+    ann_vol = float(np.sqrt(max(port_daily_var, 0.0)) * np.sqrt(252.0))
+
+    final_vals = paths[:, -1]
+    prob_positive = float(np.mean(final_vals > initial_value))
+
+    out = {
+        "dates": dates,
+        "percentiles": {
+            "p5": p5.tolist(),
+            "p25": p25.tolist(),
+            "p50": p50.tolist(),
+            "p75": p75.tolist(),
+            "p95": p95.tolist(),
+        },
+        "samples": samples,
+        "stats": {
+            "n_simulations": int(n_simulations),
+            "horizon_days": int(horizon_days),
+            "lookback_start": str(log_rets.index[0].date().isoformat()),
+            "lookback_end": str(log_rets.index[-1].date().isoformat()),
+            "initial_value": float(initial_value),
+            "expected_final": float(np.mean(final_vals)),
+            "p5_final": float(p5[-1]),
+            "p25_final": float(p25[-1]),
+            "p50_final": float(p50[-1]),
+            "p75_final": float(p75[-1]),
+            "p95_final": float(p95[-1]),
+            "annualized_drift": ann_drift,
+            "annualized_volatility": ann_vol,
+            "prob_positive": prob_positive,
+        },
+        "tickers": available,
+        "weights": w_kept.tolist(),
+        "errors": errors,
+    }
+    MC_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/monte-carlo", response_model=MonteCarloResponse)
+def yahoo_monte_carlo_post(req: MonteCarloRequest):
+    try:
+        return _run_monte_carlo(
+            tickers=req.tickers,
+            weights=req.weights,
+            horizon_days=req.horizon_days,
+            n_simulations=req.n_simulations,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            seed=req.seed,
+            n_sample_paths=req.n_sample_paths,
+            initial_value=req.initial_value,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
