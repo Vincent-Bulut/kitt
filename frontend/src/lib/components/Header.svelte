@@ -1,15 +1,10 @@
-<script></script>
+<script>
+</script>
 
 <nav class="header-kitt">
     <a href="/" class="logo">K</a>
     <div class="tabs">
-        <div class="tab dropdown">
-            <span class="dropdown-trigger">Portfolio</span>
-            <div class="dropdown-menu">
-                <a href="/positions" class="dropdown-item">Positions</a>
-                <a href="/risk" class="dropdown-item">Risk</a>
-            </div>
-        </div>
+        <a href="/portfolio" class="tab">Portfolio</a>
         <div class="tab dropdown">
             <span class="dropdown-trigger">REFERENTIAL</span>
             <div class="dropdown-menu">
@@ -17,7 +12,6 @@
             </div>
         </div>
         <a href="/analytics" class="tab analytics-tab">ANALYTICS</a>
-        <!--        <a href="/referential" class="tab">Referential</a>-->
     </div>
     <a href="/admin" class="admin-tab">Admin</a>
 </nav>
