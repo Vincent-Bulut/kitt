@@ -53,6 +53,66 @@
         rows: PositionRow[];
     };
 
+    type PerfRow = {
+        ticker: string;
+        asof_requested: string | null;
+        asof_used: string;
+        last: number;
+        perf: Record<string, number | null>;
+    };
+
+    type AnnVolRow = {
+        ticker: string;
+        annualized_volatility: number;
+    };
+
+    type DrawdownPoint = {
+        date: string;
+        price: number;
+        running_max: number;
+        drawdown: number;
+    };
+
+    type DrawdownEpisode = {
+        start_date: string;
+        trough_date: string;
+        end_date: string | null;
+        duration_days: number;
+        max_drawdown: number;
+    };
+
+    type DrawdownRow = {
+        ticker: string;
+        metrics: {
+            max_drawdown: number;
+            current_drawdown: number;
+            num_drawdown_episodes: number;
+            avg_drawdown_length_trading_days: number;
+            max_drawdown_length_trading_days: number;
+            worst_episode_trough: number;
+        };
+        episodes: DrawdownEpisode[];
+        series?: DrawdownPoint[];
+    };
+
+    type CumReturnPoint = {
+        date: string;
+        cum_return: number;
+    };
+
+    type CumReturnSeries = {
+        ticker: string;
+        points: CumReturnPoint[];
+    };
+
+    type AllMetricsResponse = {
+        perf?: { data: PerfRow[] };
+        vol?: { data: AnnVolRow[] };
+        dd?: { data: DrawdownRow[] };
+        risk?: { data: VaREsRow[] };
+        cum_returns?: { data: CumReturnSeries[] };
+    };
+
     let portfolios: Portfolio[] = [];
     let assets: Asset[] = [];
     let selectedPortfolioId: number | null = null;
@@ -69,7 +129,17 @@
     let formError = "";
     let formOk = "";
 
-    let view: "log" | "positions" = "positions";
+    let view: "log" | "positions" | "analytics" = "positions";
+
+    let analyticsRows: PerfRow[] = [];
+    let volRows: AnnVolRow[] = [];
+    let ddRows: DrawdownRow[] = [];
+    let riskRows: VaREsRow[] = [];
+    let cumReturnsRows: CumReturnSeries[] = [];
+    let isFetchingAnalytics = false;
+    let analyticsError = "";
+    let confidenceLevels = "0.95";
+    let selectedPeriod = "3Y";
 
     let form = {
         symbol: "",
@@ -81,6 +151,29 @@
         amount: "",
         currency: ""
     };
+
+    let feeManuallyEdited = false;
+
+    function computeFee(montant: number): number {
+        const raw = montant < 7750 ? 16.65 : montant * 0.0022;
+        return Math.round(raw * 100) / 100;
+    }
+
+    $: if (!feeManuallyEdited) {
+        const q = Number(form.quantity);
+        const p = Number(form.price);
+        const a = Number(form.amount);
+        const montant =
+            Number.isFinite(a) && a > 0
+                ? a
+                : Number.isFinite(q) && Number.isFinite(p) && q > 0 && p > 0
+                ? q * p
+                : 0;
+        if (montant > 0) {
+            const next = computeFee(montant);
+            if (form.transaction_fee !== next) form.transaction_fee = next as any;
+        }
+    }
 
     async function loadPortfolios() {
         isLoadingPortfolios = true;
@@ -119,11 +212,53 @@
             ]);
             transactions = txRes.data ?? [];
             positionView = posRes.data;
+
+            if (view === "analytics") {
+                loadAnalytics();
+            }
         } catch (err: any) {
             errorMessage = err?.response?.data?.detail || err?.message || "Unable to load portfolio data.";
         } finally {
             isLoadingData = false;
         }
+    }
+
+    async function loadAnalytics() {
+        if (!positionView || positionView.rows.length === 0) {
+            analyticsRows = [];
+            volRows = [];
+            ddRows = [];
+            riskRows = [];
+            cumReturnsRows = [];
+            return;
+        }
+        isFetchingAnalytics = true;
+        analyticsError = "";
+        try {
+            const tickers = positionView.rows.map(r => r.symbol);
+            const payload = {
+                tickers,
+                asof: positionView.asof_used || null,
+                period: selectedPeriod,
+                auto_adjust: true,
+                frequency: "daily",
+                confidence_levels: confidenceLevels
+            };
+            const res = await instance.post<AllMetricsResponse>("/analytics/yahoo/all-metrics", payload);
+            analyticsRows = res.data?.perf?.data ?? [];
+            volRows = res.data?.vol?.data ?? [];
+            ddRows = res.data?.dd?.data ?? [];
+            riskRows = res.data?.risk?.data ?? [];
+            cumReturnsRows = res.data?.cum_returns?.data ?? [];
+        } catch (err: any) {
+            analyticsError = err?.response?.data?.detail || err?.message || "Unable to load analytics.";
+        } finally {
+            isFetchingAnalytics = false;
+        }
+    }
+
+    $: if (view === "analytics" && positionView && analyticsRows.length === 0 && !isFetchingAnalytics) {
+        loadAnalytics();
     }
 
     async function createTransaction() {
@@ -178,6 +313,7 @@
             form.price = "";
             form.transaction_fee = "";
             form.amount = "";
+            feeManuallyEdited = false;
             await loadData();
         } catch (err: any) {
             formError = err?.response?.data?.detail || err?.message || "Unable to create transaction.";
@@ -199,6 +335,11 @@
         }
     }
 
+    function formatPctPerf(v: number | null | undefined) {
+        if (v === null || v === undefined || Number.isNaN(v)) return "—";
+        return `${v.toFixed(2)}%`;
+    }
+
     function formatPct(v: number | null | undefined) {
         if (v === null || v === undefined || Number.isNaN(v)) return "—";
         return `${(v * 100).toFixed(2)}%`;
@@ -214,6 +355,70 @@
         if (v > 0) return "greenText";
         if (v < 0) return "redText";
         return "";
+    }
+
+    // SVG Helpers
+    const CHART_W = 360;
+    const CHART_H = 100;
+    const CHART_PAD = { top: 10, right: 10, bottom: 20, left: 40 };
+
+    function buildLinePath(points: { x: number; y: number }[]) {
+        if (points.length < 2) return "";
+        return `M ${points[0].x} ${points[0].y} ` + points.slice(1).map(p => `L ${p.x} ${p.y}`).join(" ");
+    }
+
+    function buildAreaPath(points: { x: number; y: number }[], baselineY: number) {
+        if (points.length < 2) return "";
+        const line = buildLinePath(points);
+        return `${line} L ${points[points.length - 1].x} ${baselineY} L ${points[0].x} ${baselineY} Z`;
+    }
+
+    function getCumReturnsChartData(series: CumReturnSeries) {
+        const pts = series.points;
+        if (!pts || pts.length === 0) return null;
+
+        const minVal = Math.min(...pts.map(p => p.cum_return));
+        const maxVal = Math.max(...pts.map(p => p.cum_return));
+        const range = maxVal - minVal || 0.1;
+        
+        const chartPoints = pts.map((p, i) => ({
+            x: CHART_PAD.left + (i / (pts.length - 1)) * (CHART_W - CHART_PAD.left - CHART_PAD.right),
+            y: CHART_H - CHART_PAD.bottom - ((p.cum_return - minVal) / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom)
+        }));
+
+        const baselineVal = 0;
+        const baselineY = CHART_H - CHART_PAD.bottom - ((baselineVal - minVal) / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom);
+
+        return {
+            path: buildLinePath(chartPoints),
+            area: buildAreaPath(chartPoints, CHART_H - CHART_PAD.bottom),
+            minVal,
+            maxVal,
+            baselineY,
+            lastVal: pts[pts.length-1].cum_return
+        };
+    }
+
+    function getDrawdownChartData(points: DrawdownPoint[] | undefined) {
+        if (!points || points.length === 0) return null;
+
+        const minDD = Math.min(...points.map(p => p.drawdown)); // Drawdown est négatif
+        const maxVal = 0;
+        const minVal = minDD < -0.01 ? minDD : -0.1;
+        const range = maxVal - minVal;
+
+        const chartPoints = points.map((p, i) => ({
+            x: CHART_PAD.left + (i / (points.length - 1)) * (CHART_W - CHART_PAD.left - CHART_PAD.right),
+            y: CHART_H - CHART_PAD.bottom - ((p.drawdown - minVal) / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom)
+        }));
+
+        return {
+            path: buildLinePath(chartPoints),
+            area: buildAreaPath(chartPoints, CHART_H - CHART_PAD.bottom - ((-minVal / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom))),
+            minVal,
+            maxVal,
+            baselineY: CHART_H - CHART_PAD.bottom - ((0 - minVal) / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom)
+        };
     }
 
     onMount(async () => {
@@ -273,6 +478,9 @@
                     <button class="switchBtn" class:active={view === "positions"} on:click={() => (view = "positions")}>
                         Positions view
                     </button>
+                    <button class="switchBtn" class:active={view === "analytics"} on:click={() => (view = "analytics")}>
+                        Analytics
+                    </button>
                     <button class="switchBtn" class:active={view === "log"} on:click={() => (view = "log")}>
                         Transactions log
                     </button>
@@ -320,7 +528,7 @@
                     </label>
                     <label class="field">
                         <span class="label">Transaction fee</span>
-                        <input class="input mono" type="number" step="any" min="0" bind:value={form.transaction_fee} placeholder="0" />
+                        <input class="input mono" type="number" step="any" min="0" bind:value={form.transaction_fee} on:input={() => (feeManuallyEdited = true)} placeholder="auto" />
                     </label>
                     <label class="field">
                         <span class="label">Amount (optional)</span>
@@ -446,6 +654,249 @@
                         <div class="emptyState">Loading positions…</div>
                     {:else}
                         <div class="emptyState">No transactions yet for this portfolio.</div>
+                    {/if}
+                </div>
+            {/if}
+
+            <!-- ANALYTICS VIEW -->
+            {#if view === "analytics"}
+                <div class="modulePanel">
+                    <div class="moduleHead">
+                        <div class="panelLabel">ASSETS ANALYTICS</div>
+                        <div class="moduleHint">Yahoo Finance comprehensive metrics</div>
+                    </div>
+
+                    <div class="analyticsSettings">
+                        <label class="field inlineField">
+                            <span class="label">VaR Confidence Levels</span>
+                            <div class="inputGroup">
+                                <input class="input mono xsmallInput" type="text" bind:value={confidenceLevels} placeholder="0.95, 0.99" />
+                                <button class="btn primary xsmall" on:click={loadAnalytics} disabled={isFetchingAnalytics}>Update</button>
+                            </div>
+                        </label>
+                        <label class="field inlineField">
+                            <span class="label">Period</span>
+                            <select class="input mono xsmallInput" bind:value={selectedPeriod} on:change={loadAnalytics} disabled={isFetchingAnalytics}>
+                                <option value="1M">1 Month</option>
+                                <option value="3M">3 Months</option>
+                                <option value="6M">6 Months</option>
+                                <option value="1Y">1 Year</option>
+                                <option value="2Y">2 Years</option>
+                                <option value="3Y">3 Years</option>
+                                <option value="5Y">5 Years</option>
+                                <option value="10Y">10 Years</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    {#if analyticsError}
+                        <div class="errorBox">{analyticsError}</div>
+                    {/if}
+
+                    {#if isFetchingAnalytics}
+                        <div class="emptyState">Fetching analytics data…</div>
+                    {:else}
+                        <div class="sectionTitle">Performance</div>
+                        <div class="tableWrap">
+                            <table class="kittTable">
+                                <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Last</th>
+                                    <th>1D</th>
+                                    <th>1W</th>
+                                    <th>1M</th>
+                                    <th>YTD</th>
+                                    <th>1Y</th>
+                                    <th>3Y</th>
+                                    <th>5Y</th>
+                                    <th>As of</th>
+                                </tr>
+                                </thead>
+                                <tbody>
+                                {#each analyticsRows as row (row.ticker)}
+                                    <tr>
+                                        <td><span class="mono">{row.ticker}</span></td>
+                                        <td><span class="mono">{formatNum(row.last, 2)}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['1D'])}">{formatPctPerf(row.perf['1D'])}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['1W'])}">{formatPctPerf(row.perf['1W'])}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['1M'])}">{formatPctPerf(row.perf['1M'])}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['YTD'])}">{formatPctPerf(row.perf['YTD'])}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['1Y'])}">{formatPctPerf(row.perf['1Y'])}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['3Y'])}">{formatPctPerf(row.perf['3Y'])}</span></td>
+                                        <td><span class="mono {pnlClass(row.perf['5Y'])}">{formatPctPerf(row.perf['5Y'])}</span></td>
+                                        <td><span class="mono soft">{row.asof_used}</span></td>
+                                    </tr>
+                                {:else}
+                                    <tr>
+                                        <td colspan="10" class="emptyState">No performance data found.</td>
+                                    </tr>
+                                {/each}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div class="grid2">
+                            <div>
+                                <div class="sectionTitle">Risk & Volatility</div>
+                                <div class="tableWrap">
+                                    <table class="kittTable">
+                                        <thead>
+                                        <tr>
+                                            <th>Symbol</th>
+                                            <th>Ann. Vol</th>
+                                            <th>Conf.</th>
+                                            <th>VaR</th>
+                                            <th>ES</th>
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        {#each volRows as vol}
+                                            {@const risk = riskRows.find(r => r.ticker === vol.ticker)}
+                                            {#if risk && risk.points.length > 0}
+                                                {#each risk.points as pt, i}
+                                                    <tr>
+                                                        {#if i === 0}
+                                                            <td rowspan={risk.points.length}><span class="mono">{vol.ticker}</span></td>
+                                                            <td rowspan={risk.points.length}><span class="mono">{formatPct(vol.annualized_volatility)}</span></td>
+                                                        {/if}
+                                                        <td><span class="mono soft">{(pt.confidence_level * 100).toFixed(0)}%</span></td>
+                                                        <td><span class="mono">{formatPct(pt.var_historical)}</span></td>
+                                                        <td><span class="mono">{formatPct(pt.es_historical)}</span></td>
+                                                    </tr>
+                                                {/each}
+                                            {:else}
+                                                <tr>
+                                                    <td><span class="mono">{vol.ticker}</span></td>
+                                                    <td><span class="mono">{formatPct(vol.annualized_volatility)}</span></td>
+                                                    <td colspan="3" class="soft">No risk data</td>
+                                                </tr>
+                                            {/if}
+                                        {/each}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="sectionTitle">Drawdowns</div>
+                                <div class="tableWrap">
+                                    <table class="kittTable">
+                                        <thead>
+                                        <tr>
+                                            <th>Symbol</th>
+                                            <th>Max DD</th>
+                                            <th>Current DD</th>
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        {#each ddRows as dd}
+                                            <tr>
+                                                <td><span class="mono">{dd.ticker}</span></td>
+                                                <td><span class="mono redText">{formatPct(dd.metrics.max_drawdown)}</span></td>
+                                                <td><span class="mono {pnlClass(-dd.metrics.current_drawdown)}">{formatPct(dd.metrics.current_drawdown)}</span></td>
+                                            </tr>
+                                        {/each}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="sectionTitle">Cumulative Returns Charts</div>
+                        <div class="chartGrid">
+                            {#each cumReturnsRows as series}
+                                {@const crData = getCumReturnsChartData(series)}
+                                <div class="chartCard">
+                                    <div class="chartHeader">
+                                        <span class="mono bold">{series.ticker}</span>
+                                        {#if crData}
+                                            <span class="mono {pnlClass(crData.lastVal)}">{formatPct(crData.lastVal)}</span>
+                                        {/if}
+                                    </div>
+                                    <div class="chartWrap">
+                                        {#if crData}
+                                            <svg viewBox="0 0 {CHART_W} {CHART_H}" class="miniChart">
+                                                <defs>
+                                                    <linearGradient id="grad-cr-{series.ticker}" x1="0" y1="0" x2="0" y2="1">
+                                                        <stop offset="0%" stop-color="rgba(0, 212, 255, 0.2)" />
+                                                        <stop offset="100%" stop-color="rgba(0, 212, 255, 0)" />
+                                                    </linearGradient>
+                                                </defs>
+                                                <line x1={CHART_PAD.left} y1={crData.baselineY} x2={CHART_W - CHART_PAD.right} y2={crData.baselineY} stroke="rgba(255,255,255,0.1)" />
+                                                <path d={crData.area} fill="url(#grad-cr-{series.ticker})" />
+                                                <path d={crData.path} fill="none" stroke="rgba(0, 212, 255, 0.8)" stroke-width="1.5" />
+                                                <text x="5" y="15" fill="rgba(255,255,255,0.4)" font-size="9">{formatPct(crData.maxVal)}</text>
+                                                <text x="5" y={CHART_H - CHART_PAD.bottom} fill="rgba(255,255,255,0.4)" font-size="9">{formatPct(crData.minVal)}</text>
+                                            </svg>
+                                        {:else}
+                                            <div class="emptyState xsmall">No return data</div>
+                                        {/if}
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+
+                        <div class="sectionTitle">Drawdown Charts</div>
+                        <div class="chartGrid">
+                            {#each ddRows as dd}
+                                {@const ddData = getDrawdownChartData(dd.series)}
+                                <div class="chartCard">
+                                    <div class="chartHeader">
+                                        <span class="mono bold">{dd.ticker}</span>
+                                        <span class="mono redText">{formatPct(dd.metrics.max_drawdown)}</span>
+                                    </div>
+                                    <div class="chartWrap">
+                                        {#if ddData}
+                                            <svg viewBox="0 0 {CHART_W} {CHART_H}" class="miniChart">
+                                                <line x1={CHART_PAD.left} y1={ddData.baselineY} x2={CHART_W - CHART_PAD.right} y2={ddData.baselineY} stroke="rgba(255,255,255,0.1)" />
+                                                <path d={ddData.area} fill="rgba(255, 69, 58, 0.1)" />
+                                                <path d={ddData.path} fill="none" stroke="rgba(255, 69, 58, 0.6)" stroke-width="1.2" />
+                                                <text x="5" y={CHART_H - CHART_PAD.bottom} fill="rgba(255,255,255,0.4)" font-size="9">{formatPct(ddData.minVal)}</text>
+                                                <text x="5" y="15" fill="rgba(255,255,255,0.4)" font-size="9">0%</text>
+                                            </svg>
+                                        {:else}
+                                            <div class="emptyState xsmall">No drawdown data</div>
+                                        {/if}
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+
+                        <div class="sectionTitle">Detailed Drawdown Episodes</div>
+                        {#each ddRows as dd}
+                            {#if dd.episodes && dd.episodes.length > 0}
+                                <div class="episodeBlock">
+                                    <div class="episodeHeader">
+                                        <span class="mono bold">{dd.ticker}</span>
+                                        <span class="soft">{dd.metrics.num_drawdown_episodes} episodes found</span>
+                                    </div>
+                                    <div class="tableWrap">
+                                        <table class="kittTable xsmallTable">
+                                            <thead>
+                                            <tr>
+                                                <th>Start</th>
+                                                <th>Trough</th>
+                                                <th>End</th>
+                                                <th>Duration</th>
+                                                <th>Depth</th>
+                                            </tr>
+                                            </thead>
+                                            <tbody>
+                                            {#each [...dd.episodes].sort((a,b) => a.max_drawdown - b.max_drawdown).slice(0, 5) as ep}
+                                                <tr>
+                                                    <td><span class="mono">{ep.start_date}</span></td>
+                                                    <td><span class="mono">{ep.trough_date}</span></td>
+                                                    <td><span class="mono">{ep.end_date ?? "Ongoing"}</span></td>
+                                                    <td><span class="mono">{ep.duration_days}d</span></td>
+                                                    <td><span class="mono redText">{formatPct(ep.max_drawdown)}</span></td>
+                                                </tr>
+                                            {/each}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            {/if}
+                        {/each}
                     {/if}
                 </div>
             {/if}
@@ -878,6 +1329,124 @@
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
         margin-bottom: 10px;
+    }
+
+    .grid2 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+    }
+
+    @media (max-width: 1100px) {
+        .grid2 {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .sectionTitle {
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: rgba(235, 235, 245, 0.7);
+        margin-bottom: 8px;
+        margin-top: 16px;
+        padding-left: 4px;
+        border-left: 2px solid rgba(255, 0, 60, 0.5);
+    }
+
+    .analyticsSettings {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .inlineField {
+        flex-direction: row !important;
+        align-items: center;
+        gap: 16px !important;
+    }
+
+    .inputGroup {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+
+    .xsmallInput {
+        width: 120px !important;
+        padding: 4px 8px !important;
+        font-size: 12px !important;
+    }
+
+    .episodeBlock {
+        margin-bottom: 24px;
+        background: rgba(255, 255, 255, 0.01);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 16px;
+    }
+
+    .episodeHeader {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 12px;
+        align-items: center;
+    }
+
+    .xsmallTable {
+        font-size: 12px;
+    }
+
+    .xsmallTable th, .xsmallTable td {
+        padding: 6px 8px;
+    }
+
+    .chartGrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+    }
+
+    .chartCard {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 12px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .chartHeader {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        padding-bottom: 8px;
+    }
+
+    .chartWrap {
+        height: 100px;
+        position: relative;
+    }
+
+    .miniChart {
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+    }
+
+    .bold {
+        font-weight: 600;
+        color: #fff;
+    }
+
+    .xsmall {
+        font-size: 11px;
     }
 
     @media (max-width: 1100px) {

@@ -111,6 +111,13 @@ class YahooCumReturnsRequest(BaseModel):
     end_date: str
     auto_adjust: bool = True
 
+class DrawdownEpisode(BaseModel):
+    start_date: str
+    trough_date: str
+    end_date: Optional[str]
+    duration_days: int
+    max_drawdown: float
+
 class DrawdownMetrics(BaseModel):
     observations: int
     max_drawdown: float
@@ -138,6 +145,7 @@ class YahooDrawdownRow(BaseModel):
     end_date_requested: str
     metrics: DrawdownMetrics
     path: DrawdownPath
+    episodes: List[DrawdownEpisode] = Field(default_factory=list)
     series: Optional[List[DrawdownPoint]] = None
 
 class YahooDrawdownResponse(BaseModel):
@@ -215,6 +223,23 @@ class YahooVaREsRequest(BaseModel):
     auto_adjust: bool = True
     return_mode: ReturnMode = "arith"
     confidence_levels: List[float] = Field(default_factory=lambda: [0.95, 0.99])
+
+
+class YahooAllMetricsResponse(BaseModel):
+    perf: Optional[YahooPerfResponse] = None
+    vol: Optional[YahooAnnVolResponse] = None
+    dd: Optional[YahooDrawdownResponse] = None
+    risk: Optional[YahooVaREsResponse] = None
+    cum_returns: Optional[YahooCumReturnsResponse] = None
+
+
+class YahooAllMetricsRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=200)
+    asof: Optional[str] = None
+    period: str = "3Y"  # Default to 3 years
+    auto_adjust: bool = True
+    frequency: VolFrequency = "daily"
+    confidence_levels: str = "0.95"
 
 # =========================================================
 # Internal helpers
@@ -758,7 +783,7 @@ def _drawdown_series(prices: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"Price": p, "RunningMax": rm, "Drawdown": dd})
 
 
-def _drawdown_metrics(prices: pd.Series) -> Dict[str, Any]:
+def _drawdown_metrics_and_episodes(prices: pd.Series) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     dd_df = _drawdown_series(prices)
     dd = dd_df["Drawdown"]
 
@@ -770,11 +795,30 @@ def _drawdown_metrics(prices: pd.Series) -> Dict[str, Any]:
 
     durations = []
     troughs = []
+    episodes = []
     for _, block in dd_df[in_dd].groupby(episode_id[in_dd]):
         durations.append(int(len(block)))
-        troughs.append(float(block["Drawdown"].min()))
+        trough_val = float(block["Drawdown"].min())
+        troughs.append(trough_val)
+        
+        trough_dt = block["Drawdown"].idxmin()
+        start_dt = block.index[0]
+        end_dt = block.index[-1]
+        
+        # Check if it's recovered (last point drawdown is 0 or it's the end of series)
+        # In this loop we only have blocks where in_dd is True. 
+        # If the block ends before the end of the full series, it means it recovered.
+        recovered = end_dt < dd.index[-1]
+        
+        episodes.append({
+            "start_date": start_dt.date().isoformat(),
+            "trough_date": trough_dt.date().isoformat(),
+            "end_date": end_dt.date().isoformat() if recovered else None,
+            "duration_days": int(len(block)),
+            "max_drawdown": trough_val
+        })
 
-    return {
+    metrics = {
         "observations": int(dd.dropna().shape[0]),
         "max_drawdown": max_dd,
         "current_drawdown": current_dd,
@@ -783,6 +827,7 @@ def _drawdown_metrics(prices: pd.Series) -> Dict[str, Any]:
         "max_drawdown_length_trading_days": int(max(durations)) if durations else 0,
         "worst_episode_trough": float(min(troughs)) if troughs else 0.0,
     }
+    return metrics, episodes
 
 
 def _max_drawdown_path(prices: pd.Series) -> Dict[str, Any]:
@@ -854,7 +899,7 @@ def _run_drawdown(
             if s.empty or len(s) < 5:
                 raise ValueError("Not enough points in window")
 
-            metrics = _drawdown_metrics(s)
+            metrics, episodes = _drawdown_metrics_and_episodes(s)
             path = _max_drawdown_path(s)
 
             row = {
@@ -863,6 +908,7 @@ def _run_drawdown(
                 "end_date_requested": end_ts.date().isoformat(),
                 "metrics": metrics,
                 "path": path,
+                "episodes": episodes,
             }
 
             if include_series:
@@ -1420,4 +1466,84 @@ def yahoo_var_es_post(req: YahooVaREsRequest):
         auto_adjust=req.auto_adjust,
         return_mode=req.return_mode,
         confidence_levels=req.confidence_levels,
+    )
+
+
+@router.post("/yahoo/all-metrics", response_model=YahooAllMetricsResponse)
+def yahoo_all_metrics_post(req: YahooAllMetricsRequest):
+    # 1. Performance
+    perf_data = _run_perf(
+        tickers=req.tickers,
+        asof=req.asof,
+        auto_adjust=req.auto_adjust,
+        format="json"
+    )
+
+    # Base date for other metrics: use asof or today
+    asof_ts = utils.convert_to_timestamp(req.asof)
+    if asof_ts is None:
+        asof_ts = pd.Timestamp.now()
+    
+    end_date_str = asof_ts.date().isoformat()
+    
+    # Calculate start_date based on period
+    period_map = {
+        "1M": 30,
+        "3M": 90,
+        "6M": 180,
+        "1Y": 365,
+        "2Y": 365 * 2,
+        "3Y": 365 * 3,
+        "5Y": 365 * 5,
+        "10Y": 365 * 10,
+    }
+    
+    days = period_map.get(req.period.upper(), 365 * 3) # default 3Y
+    start_date_str = (asof_ts - pd.Timedelta(days=days)).date().isoformat()
+
+    # 2. Volatility
+    vol_data = _run_annualized_volatility(
+        tickers=req.tickers,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        auto_adjust=req.auto_adjust,
+        frequency=req.frequency,
+        return_mode="arith"
+    )
+
+    # 3. Drawdowns
+    dd_data = _run_drawdown(
+        tickers=req.tickers,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        auto_adjust=req.auto_adjust,
+        include_series=True
+    )
+
+    # 4. Risk (VaR/ES)
+    cl_list = [float(x.strip()) for x in req.confidence_levels.split(",") if x.strip()]
+    risk_data = _run_var_es(
+        tickers=req.tickers,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        auto_adjust=req.auto_adjust,
+        return_mode="arith",
+        confidence_levels=cl_list
+    )
+
+    # 5. Cumulative Returns
+    cum_returns_data = _run_cum_returns(
+        tickers=req.tickers,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        auto_adjust=req.auto_adjust,
+        format="json"
+    )
+
+    return YahooAllMetricsResponse(
+        perf=YahooPerfResponse(**perf_data),
+        vol=YahooAnnVolResponse(**vol_data),
+        dd=YahooDrawdownResponse(**dd_data),
+        risk=YahooVaREsResponse(**risk_data),
+        cum_returns=YahooCumReturnsResponse(**cum_returns_data)
     )
