@@ -159,12 +159,12 @@
             quantity: qty,
             price: price
         };
-        if (form.transaction_fee.trim()) {
-            const fee = parseFloat(form.transaction_fee);
+        if (form.transaction_fee !== "" && form.transaction_fee != null) {
+            const fee = Number(form.transaction_fee);
             if (Number.isFinite(fee)) payload.transaction_fee = fee;
         }
-        if (form.amount.trim()) {
-            const amt = parseFloat(form.amount);
+        if (form.amount !== "" && form.amount != null) {
+            const amt = Number(form.amount);
             if (Number.isFinite(amt)) payload.amount = amt;
         }
         if (form.currency.trim()) payload.currency = form.currency.trim().toUpperCase();
