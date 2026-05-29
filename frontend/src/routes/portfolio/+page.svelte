@@ -141,6 +141,38 @@
     let confidenceLevels = "0.95";
     let selectedPeriod = "3Y";
 
+    type MonteCarloResult = {
+        dates: string[];
+        percentiles: { p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[] };
+        samples: number[][];
+        stats: {
+            n_simulations: number;
+            horizon_days: number;
+            lookback_start: string;
+            lookback_end: string;
+            initial_value: number;
+            expected_final: number;
+            p5_final: number;
+            p25_final: number;
+            p50_final: number;
+            p75_final: number;
+            p95_final: number;
+            annualized_drift: number;
+            annualized_volatility: number;
+            prob_positive: number;
+        };
+        tickers: string[];
+        weights: number[];
+        errors: Record<string, string>;
+    };
+
+    let mcResult: MonteCarloResult | null = null;
+    let mcHorizonDays = 252;
+    let mcNSimulations = 1000;
+    let mcLookback = "3Y";
+    let isFetchingMC = false;
+    let mcError = "";
+
     let form = {
         symbol: "",
         date: "",
@@ -261,6 +293,42 @@
         loadAnalytics();
     }
 
+    async function runMonteCarlo() {
+        if (!positionView || positionView.rows.length === 0) {
+            mcError = "No positions to simulate.";
+            return;
+        }
+        const eligible = positionView.rows.filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length === 0) {
+            mcError = "No positions with a valid market weight.";
+            return;
+        }
+        isFetchingMC = true;
+        mcError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                weights: eligible.map(r => r.weight as number),
+                horizon_days: mcHorizonDays,
+                n_simulations: mcNSimulations,
+                lookback_period: mcLookback,
+                auto_adjust: true,
+                initial_value: positionView.total_market_value || 1.0,
+                n_sample_paths: 30,
+                seed: 42
+            };
+            const res = await instance.post<MonteCarloResult>("/analytics/yahoo/monte-carlo", payload);
+            mcResult = res.data;
+        } catch (err: any) {
+            mcError = err?.response?.data?.detail || err?.message || "Unable to run Monte Carlo simulation.";
+            mcResult = null;
+        } finally {
+            isFetchingMC = false;
+        }
+    }
+
     async function createTransaction() {
         formError = "";
         formOk = "";
@@ -362,6 +430,11 @@
     const CHART_H = 100;
     const CHART_PAD = { top: 10, right: 10, bottom: 20, left: 40 };
 
+    // Monte Carlo chart dimensions (full-width, taller)
+    const MC_W = 960;
+    const MC_H = 380;
+    const MC_PAD = { top: 20, right: 60, bottom: 28, left: 70 };
+
     function buildLinePath(points: { x: number; y: number }[]) {
         if (points.length < 2) return "";
         return `M ${points[0].x} ${points[0].y} ` + points.slice(1).map(p => `L ${p.x} ${p.y}`).join(" ");
@@ -418,6 +491,70 @@
             minVal,
             maxVal,
             baselineY: CHART_H - CHART_PAD.bottom - ((0 - minVal) / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom)
+        };
+    }
+
+    function getMonteCarloChartData(result: MonteCarloResult | null) {
+        if (!result) return null;
+        const { percentiles, samples, stats } = result;
+        const n = percentiles.p5.length;
+        if (n < 2) return null;
+
+        const allValues: number[] = [
+            ...percentiles.p5,
+            ...percentiles.p95,
+            ...samples.flat(),
+            stats.initial_value
+        ];
+        const minVal = Math.min(...allValues);
+        const maxVal = Math.max(...allValues);
+        const pad = (maxVal - minVal) * 0.05 || 0.01;
+        const yMin = minVal - pad;
+        const yMax = maxVal + pad;
+        const range = yMax - yMin;
+
+        const innerW = MC_W - MC_PAD.left - MC_PAD.right;
+        const innerH = MC_H - MC_PAD.top - MC_PAD.bottom;
+
+        const xAt = (i: number) => MC_PAD.left + (i / (n - 1)) * innerW;
+        const yAt = (v: number) => MC_PAD.top + (1 - (v - yMin) / range) * innerH;
+
+        const toPath = (arr: number[]) =>
+            buildLinePath(arr.map((v, i) => ({ x: xAt(i), y: yAt(v) })));
+
+        const bandPath = (lower: number[], upper: number[]) => {
+            const top = upper.map((v, i) => `${xAt(i)} ${yAt(v)}`);
+            const bot = lower.map((v, i) => `${xAt(i)} ${yAt(v)}`).reverse();
+            return `M ${top.join(" L ")} L ${bot.join(" L ")} Z`;
+        };
+
+        const initialY = yAt(stats.initial_value);
+        const baselineY = Number.isFinite(initialY) ? initialY : MC_H - MC_PAD.bottom;
+
+        const yTicks = 5;
+        const tickValues: { value: number; y: number }[] = [];
+        for (let i = 0; i <= yTicks; i++) {
+            const v = yMin + (range * i) / yTicks;
+            tickValues.push({ value: v, y: yAt(v) });
+        }
+
+        const xTickCount = Math.min(6, n);
+        const xTicks: { date: string; x: number }[] = [];
+        for (let i = 0; i < xTickCount; i++) {
+            const idx = Math.round((i / (xTickCount - 1)) * (n - 1));
+            xTicks.push({ date: result.dates[idx] ?? "", x: xAt(idx) });
+        }
+
+        return {
+            bandOuter: bandPath(percentiles.p5, percentiles.p95),
+            bandInner: bandPath(percentiles.p25, percentiles.p75),
+            median: toPath(percentiles.p50),
+            samplePaths: samples.map(s => toPath(s)),
+            baselineY,
+            yTicks: tickValues,
+            xTicks,
+            yMin,
+            yMax,
         };
     }
 
@@ -898,6 +1035,142 @@
                             {/if}
                         {/each}
                     {/if}
+
+                    <!-- MONTE CARLO SIMULATION -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Monte Carlo · Portfolio Trajectories</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Horizon (trading days)</span>
+                                <input class="input mono xsmallInput" type="number" min="10" max="2520" step="1" bind:value={mcHorizonDays} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Simulations</span>
+                                <input class="input mono xsmallInput" type="number" min="50" max="20000" step="50" bind:value={mcNSimulations} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={mcLookback}>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <button class="btn primary xsmall" on:click={runMonteCarlo} disabled={isFetchingMC || !positionView || positionView.rows.length === 0}>
+                                {isFetchingMC ? "Simulating…" : "Run simulation"}
+                            </button>
+                        </div>
+
+                        {#if mcError}
+                            <div class="errorBox">{mcError}</div>
+                        {/if}
+
+                        {#if mcResult}
+                            {@const mcData = getMonteCarloChartData(mcResult)}
+                            {#if mcData}
+                                <div class="mcChartWrap">
+                                    <svg viewBox="0 0 {MC_W} {MC_H}" class="mcChart" preserveAspectRatio="xMidYMid meet">
+                                        <defs>
+                                            <linearGradient id="mc-band-outer" x1="0" y1="0" x2="0" y2="1">
+                                                <stop offset="0%" stop-color="rgba(0, 212, 255, 0.18)" />
+                                                <stop offset="100%" stop-color="rgba(0, 212, 255, 0.04)" />
+                                            </linearGradient>
+                                            <linearGradient id="mc-band-inner" x1="0" y1="0" x2="0" y2="1">
+                                                <stop offset="0%" stop-color="rgba(0, 212, 255, 0.35)" />
+                                                <stop offset="100%" stop-color="rgba(0, 212, 255, 0.12)" />
+                                            </linearGradient>
+                                        </defs>
+
+                                        <!-- Y gridlines + labels -->
+                                        {#each mcData.yTicks as tick}
+                                            <line x1={MC_PAD.left} y1={tick.y} x2={MC_W - MC_PAD.right} y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1" />
+                                            <text x={MC_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="end" class="mono">
+                                                {tick.value.toFixed(0)}
+                                            </text>
+                                        {/each}
+
+                                        <!-- Baseline (initial value) -->
+                                        <line x1={MC_PAD.left} y1={mcData.baselineY} x2={MC_W - MC_PAD.right} y2={mcData.baselineY} stroke="rgba(255,255,255,0.35)" stroke-width="1" stroke-dasharray="3 3" />
+
+                                        <!-- 5-95 percentile band -->
+                                        <path d={mcData.bandOuter} fill="url(#mc-band-outer)" />
+                                        <!-- 25-75 percentile band -->
+                                        <path d={mcData.bandInner} fill="url(#mc-band-inner)" />
+
+                                        <!-- Spaghetti sample paths -->
+                                        {#each mcData.samplePaths as p, i}
+                                            <path d={p} fill="none" stroke="rgba(0, 212, 255, 0.18)" stroke-width="0.7" />
+                                        {/each}
+
+                                        <!-- Median -->
+                                        <path d={mcData.median} fill="none" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2" />
+
+                                        <!-- X-axis ticks -->
+                                        {#each mcData.xTicks as tick}
+                                            <line x1={tick.x} y1={MC_H - MC_PAD.bottom} x2={tick.x} y2={MC_H - MC_PAD.bottom + 4} stroke="rgba(255,255,255,0.35)" />
+                                            <text x={tick.x} y={MC_H - MC_PAD.bottom + 16} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle" class="mono">{tick.date}</text>
+                                        {/each}
+
+                                        <!-- Legend -->
+                                        <g transform="translate({MC_W - MC_PAD.right - 130}, {MC_PAD.top + 4})">
+                                            <rect x="0" y="0" width="14" height="8" fill="url(#mc-band-outer)" />
+                                            <text x="20" y="8" fill="rgba(255,255,255,0.65)" font-size="10" class="mono">5–95%</text>
+                                            <rect x="0" y="14" width="14" height="8" fill="url(#mc-band-inner)" />
+                                            <text x="20" y="22" fill="rgba(255,255,255,0.65)" font-size="10" class="mono">25–75%</text>
+                                            <line x1="0" y1="32" x2="14" y2="32" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2" />
+                                            <text x="20" y="36" fill="rgba(255,255,255,0.65)" font-size="10" class="mono">Median</text>
+                                        </g>
+                                    </svg>
+                                </div>
+
+                                <div class="mcStatsGrid">
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Initial</div>
+                                        <div class="mcStatValue mono">{formatNum(mcResult.stats.initial_value, 2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Expected final</div>
+                                        <div class="mcStatValue mono {pnlClass(mcResult.stats.expected_final - mcResult.stats.initial_value)}">{formatNum(mcResult.stats.expected_final, 2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Median final</div>
+                                        <div class="mcStatValue mono {pnlClass(mcResult.stats.p50_final - mcResult.stats.initial_value)}">{formatNum(mcResult.stats.p50_final, 2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">5% final (worst)</div>
+                                        <div class="mcStatValue mono redText">{formatNum(mcResult.stats.p5_final, 2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">95% final (best)</div>
+                                        <div class="mcStatValue mono greenText">{formatNum(mcResult.stats.p95_final, 2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">P(positive)</div>
+                                        <div class="mcStatValue mono">{formatPct(mcResult.stats.prob_positive)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Ann. drift</div>
+                                        <div class="mcStatValue mono {pnlClass(mcResult.stats.annualized_drift)}">{formatPct(mcResult.stats.annualized_drift)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Ann. volatility</div>
+                                        <div class="mcStatValue mono">{formatPct(mcResult.stats.annualized_volatility)}</div>
+                                    </div>
+                                </div>
+
+                                <div class="mcFootnote soft">
+                                    {mcResult.stats.n_simulations} simulations · {mcResult.stats.horizon_days} trading days · params estimated on {mcResult.stats.lookback_start} → {mcResult.stats.lookback_end}
+                                    {#if Object.keys(mcResult.errors).length > 0}
+                                        · Skipped tickers: {Object.keys(mcResult.errors).join(", ")}
+                                    {/if}
+                                </div>
+                            {/if}
+                        {:else if !isFetchingMC}
+                            <div class="emptyState">Click "Run simulation" to project {mcHorizonDays} trading days forward using {mcNSimulations} GBM paths.</div>
+                        {/if}
+                    </div>
                 </div>
             {/if}
 
@@ -1438,6 +1711,67 @@
         width: 100%;
         height: 100%;
         overflow: visible;
+    }
+
+    .mcSection {
+        margin-top: 32px;
+        padding-top: 24px;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .mcControls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: flex-end;
+        margin: 12px 0 20px 0;
+    }
+
+    .mcChartWrap {
+        background: rgba(0, 0, 0, 0.18);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 12px;
+        padding: 16px;
+        margin-top: 8px;
+    }
+
+    .mcChart {
+        width: 100%;
+        height: auto;
+        max-height: 420px;
+        display: block;
+    }
+
+    .mcStatsGrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+    }
+
+    .mcStat {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 10px 12px;
+    }
+
+    .mcStatLabel {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: rgba(255, 255, 255, 0.5);
+        margin-bottom: 4px;
+    }
+
+    .mcStatValue {
+        font-size: 15px;
+        font-weight: 600;
+    }
+
+    .mcFootnote {
+        margin-top: 12px;
+        font-size: 11px;
     }
 
     .bold {
