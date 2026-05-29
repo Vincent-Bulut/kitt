@@ -274,10 +274,6 @@
                         Transactions log
                     </button>
                 </div>
-
-                <button class="btn ghost" type="button" on:click={loadData} disabled={isLoadingData || selectedPortfolioId === null}>
-                    {isLoadingData ? "Refreshing…" : "Refresh"}
-                </button>
             </div>
 
             {#if errorMessage}
