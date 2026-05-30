@@ -274,6 +274,58 @@
     let isFetchingEF = false;
     let efError = "";
 
+    type SampledPortfolio = {
+        tickers: string[];
+        weights: number[];
+        expected_return: number;
+        volatility: number;
+        sharpe: number;
+        avg_correlation: number;
+        composite_score: number;
+    };
+
+    type SamplerCloudPoint = {
+        volatility: number;
+        expected_return: number;
+        sharpe: number;
+        avg_correlation: number;
+        composite_score: number;
+        tickers: string[];
+        weights: number[];
+    };
+
+    type PortfolioSamplerResult = {
+        universe: string[];
+        portfolio_size: number;
+        n_simulations_requested: number;
+        n_simulations_evaluated: number;
+        n_simulations_failed: number;
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        risk_free_rate: number;
+        diversification_weight: number;
+        optimization: "max_sharpe" | "equal_weight";
+        top_by_composite: SampledPortfolio[];
+        top_by_sharpe: SampledPortfolio[];
+        cloud: SamplerCloudPoint[];
+        errors: Record<string, string>;
+    };
+
+    let samplerResult: PortfolioSamplerResult | null = null;
+    let samplerPortfolioSize = 5;
+    let samplerNSimulations = 200;
+    let samplerTopK = 5;
+    let samplerLookback = "3Y";
+    let samplerRf = 0.02;
+    let samplerDivWeight = 0.5;
+    let samplerOpt: "max_sharpe" | "equal_weight" = "max_sharpe";
+    let samplerSeed = 42;
+    let samplerRankBy: "composite" | "sharpe" = "composite";
+    let isFetchingSampler = false;
+    let samplerError = "";
+    let selectedSamplerPoint: SamplerCloudPoint | null = null;
+
     let form = {
         symbol: "",
         date: "",
@@ -428,6 +480,90 @@
         } finally {
             isFetchingMC = false;
         }
+    }
+
+    async function runSampler() {
+        if (!assets || assets.length < samplerPortfolioSize) {
+            samplerError = `Need at least ${samplerPortfolioSize} assets in the referential.`;
+            samplerResult = null;
+            return;
+        }
+        isFetchingSampler = true;
+        samplerError = "";
+        selectedSamplerPoint = null;
+        try {
+            const payload = {
+                tickers: assets.map(a => a.symbol),
+                portfolio_size: samplerPortfolioSize,
+                n_simulations: samplerNSimulations,
+                top_k: samplerTopK,
+                lookback_period: samplerLookback,
+                auto_adjust: true,
+                risk_free_rate: samplerRf,
+                diversification_weight: samplerDivWeight,
+                optimization: samplerOpt,
+                seed: samplerSeed
+            };
+            const res = await instance.post<PortfolioSamplerResult>("/analytics/yahoo/portfolio-sampler", payload);
+            samplerResult = res.data;
+        } catch (err: any) {
+            samplerError = err?.response?.data?.detail || err?.message || "Unable to run portfolio sampler.";
+            samplerResult = null;
+        } finally {
+            isFetchingSampler = false;
+        }
+    }
+
+    // Sampler scatter chart geometry
+    const SAMP_W = 960;
+    const SAMP_H = 420;
+    const SAMP_PAD = { top: 24, right: 24, bottom: 44, left: 64 };
+
+    function getSamplerChartData(r: PortfolioSamplerResult | null) {
+        if (!r || r.cloud.length === 0) return null;
+        const allX = r.cloud.map(p => p.volatility);
+        const allY = r.cloud.map(p => p.expected_return);
+        const xMin = 0;
+        const xMax = Math.max(...allX) * 1.05;
+        const yLo = Math.min(...allY);
+        const yHi = Math.max(...allY);
+        const yPad = (yHi - yLo) * 0.10 || 0.01;
+        const yMin = yLo - yPad;
+        const yMax = yHi + yPad;
+
+        const innerW = SAMP_W - SAMP_PAD.left - SAMP_PAD.right;
+        const innerH = SAMP_H - SAMP_PAD.top - SAMP_PAD.bottom;
+
+        const xAt = (v: number) => SAMP_PAD.left + ((v - xMin) / (xMax - xMin || 1)) * innerW;
+        const yAt = (v: number) => SAMP_PAD.top + (1 - (v - yMin) / (yMax - yMin || 1)) * innerH;
+
+        const xTicks: { value: number; x: number }[] = [];
+        const yTicks: { value: number; y: number }[] = [];
+        for (let i = 0; i <= 5; i++) {
+            const vx = xMin + ((xMax - xMin) * i) / 5;
+            xTicks.push({ value: vx, x: xAt(vx) });
+            const vy = yMin + ((yMax - yMin) * i) / 5;
+            yTicks.push({ value: vy, y: yAt(vy) });
+        }
+        return { xAt, yAt, xMin, xMax, yMin, yMax, xTicks, yTicks };
+    }
+
+    function selectSamplerPointOnKey(e: KeyboardEvent, pt: SamplerCloudPoint) {
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            selectedSamplerPoint = pt;
+        }
+    }
+
+    // Color points by correlation balance (greener = lower correlation)
+    function corrPointColor(avgCorr: number, alpha: number = 0.55): string {
+        const c = Math.max(-0.2, Math.min(1, avgCorr));
+        // 0 -> green, 1 -> red
+        const t = (c + 0.2) / 1.2; // [0..1]
+        const r = Math.round(255 * t);
+        const g = Math.round(180 * (1 - t) + 60 * t);
+        const b = Math.round(120 * (1 - t));
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
     async function runEfficientFrontier() {
@@ -1759,6 +1895,254 @@
                         {/if}
                     </div>
 
+                    <!-- RANDOM PORTFOLIO SAMPLER -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Random Portfolio Sampler · Top-K Discovery</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Portfolio size</span>
+                                <input class="input mono xsmallInput" type="number" min="2" max="20" step="1" bind:value={samplerPortfolioSize} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Simulations</span>
+                                <input class="input mono xsmallInput" type="number" min="10" max="5000" step="10" bind:value={samplerNSimulations} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Top-K</span>
+                                <input class="input mono xsmallInput" type="number" min="1" max="50" step="1" bind:value={samplerTopK} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={samplerLookback}>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Risk-free rate</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001" bind:value={samplerRf} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Diversification λ</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="5" step="0.05" bind:value={samplerDivWeight} />
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Weighting</span>
+                                <select class="input mono xsmallInput" bind:value={samplerOpt}>
+                                    <option value="max_sharpe">Max Sharpe (Markowitz)</option>
+                                    <option value="equal_weight">Equal weight (1/N)</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Seed</span>
+                                <input class="input mono xsmallInput" type="number" step="1" bind:value={samplerSeed} />
+                            </label>
+                            <button class="btn primary xsmall" on:click={runSampler}
+                                    disabled={isFetchingSampler || !assets || assets.length < samplerPortfolioSize}>
+                                {isFetchingSampler ? "Sampling…" : "Run sampler"}
+                            </button>
+                        </div>
+
+                        <div class="soft xsmall mono" style="margin-bottom: 6px;">
+                            Universe: {assets.length} asset(s) from referential · score = sharpe − λ × avg_correlation
+                        </div>
+
+                        {#if samplerError}
+                            <div class="errorBox">{samplerError}</div>
+                        {/if}
+
+                        {#if samplerResult}
+                            {@const samp = getSamplerChartData(samplerResult)}
+                            {@const topList = samplerRankBy === "composite" ? samplerResult.top_by_composite : samplerResult.top_by_sharpe}
+                            {@const topSet = new Set(topList.map(p => p.tickers.join("|") + ":" + p.sharpe.toFixed(6)))}
+                            {#if samp}
+                                <div class="efChartWrap">
+                                    <svg viewBox="0 0 {SAMP_W} {SAMP_H}" class="mcChart" preserveAspectRatio="xMidYMid meet">
+                                        {#each samp.yTicks as tick}
+                                            <line x1={SAMP_PAD.left} y1={tick.y} x2={SAMP_W - SAMP_PAD.right} y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1" />
+                                            <text x={SAMP_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="end" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+                                        {#each samp.xTicks as tick}
+                                            <line x1={tick.x} y1={SAMP_PAD.top} x2={tick.x} y2={SAMP_H - SAMP_PAD.bottom} stroke="rgba(255,255,255,0.04)" stroke-width="1" />
+                                            <text x={tick.x} y={SAMP_H - SAMP_PAD.bottom + 16} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+
+                                        <text x={SAMP_W / 2} y={SAMP_H - 6} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle">Annualized volatility</text>
+                                        <text x={14} y={SAMP_H / 2} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {SAMP_H / 2})">Annualized return</text>
+
+                                        <!-- Cloud (all simulated portfolios), colored by avg correlation -->
+                                        {#each samplerResult.cloud as pt}
+                                            <circle cx={samp.xAt(pt.volatility)} cy={samp.yAt(pt.expected_return)} r="4"
+                                                    fill={corrPointColor(pt.avg_correlation, 0.55)}
+                                                    class="clickablePoint"
+                                                    role="button" tabindex="0"
+                                                    aria-label="Portfolio: Sharpe {pt.sharpe.toFixed(2)}, correlation {pt.avg_correlation.toFixed(2)}"
+                                                    on:click={() => (selectedSamplerPoint = pt)}
+                                                    on:keydown={(e) => selectSamplerPointOnKey(e, pt)}>
+                                                <title>vol {(pt.volatility*100).toFixed(2)}% · ret {(pt.expected_return*100).toFixed(2)}% · Sharpe {pt.sharpe.toFixed(2)} · avg ρ {pt.avg_correlation.toFixed(2)} — click for composition</title>
+                                            </circle>
+                                        {/each}
+
+                                        <!-- Top-K highlighted -->
+                                        {#each topList as p, i}
+                                            <circle cx={samp.xAt(p.volatility)} cy={samp.yAt(p.expected_return)} r="8"
+                                                    fill="rgba(255, 215, 0, 0.95)" stroke="#0a0a12" stroke-width="1.5"
+                                                    class="clickablePoint"
+                                                    role="button" tabindex="0"
+                                                    aria-label="Top portfolio #{i+1}: {p.tickers.join(', ')}"
+                                                    on:click={() => (selectedSamplerPoint = p as any)}
+                                                    on:keydown={(e) => selectSamplerPointOnKey(e, p as any)}>
+                                                <title>#{i+1} · {p.tickers.join(", ")} · Sharpe {p.sharpe.toFixed(2)} · avg ρ {p.avg_correlation.toFixed(2)} · score {p.composite_score.toFixed(2)} — click for composition</title>
+                                            </circle>
+                                            <text x={samp.xAt(p.volatility)} y={samp.yAt(p.expected_return) - 11}
+                                                  fill="rgba(255, 215, 0, 0.95)" font-size="11" font-weight="700" text-anchor="middle" class="mono"
+                                                  style="pointer-events: none;">#{i+1}</text>
+                                        {/each}
+
+                                        <!-- Selected point highlight ring (rendered on top) -->
+                                        {#if selectedSamplerPoint}
+                                            <circle cx={samp.xAt(selectedSamplerPoint.volatility)} cy={samp.yAt(selectedSamplerPoint.expected_return)} r="11"
+                                                    fill="none" stroke="rgba(255, 255, 255, 0.95)" stroke-width="2"
+                                                    style="pointer-events: none;" />
+                                            <circle cx={samp.xAt(selectedSamplerPoint.volatility)} cy={samp.yAt(selectedSamplerPoint.expected_return)} r="14"
+                                                    fill="none" stroke="rgba(255, 255, 255, 0.30)" stroke-width="1"
+                                                    style="pointer-events: none;" />
+                                        {/if}
+
+                                        <!-- Current portfolio if available from EF result -->
+                                        {#if efResult?.current_portfolio}
+                                            <circle cx={samp.xAt(efResult.current_portfolio.volatility)} cy={samp.yAt(efResult.current_portfolio.expected_return)} r="7"
+                                                    fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.4">
+                                                <title>Your portfolio · Sharpe {efResult.current_portfolio.sharpe.toFixed(2)}</title>
+                                            </circle>
+                                        {/if}
+
+                                        <!-- Legend -->
+                                        <g transform="translate({SAMP_W - SAMP_PAD.right - 220}, {SAMP_PAD.top + 6})">
+                                            <circle cx="6" cy="6" r="3" fill={corrPointColor(0, 0.6)} />
+                                            <text x="16" y="9" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Sim · low correlation</text>
+                                            <circle cx="6" cy="22" r="3" fill={corrPointColor(0.5, 0.6)} />
+                                            <text x="16" y="25" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Sim · medium</text>
+                                            <circle cx="6" cy="38" r="3" fill={corrPointColor(1, 0.6)} />
+                                            <text x="16" y="41" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Sim · high correlation</text>
+                                            <circle cx="6" cy="56" r="6" fill="rgba(255, 215, 0, 0.95)" stroke="#0a0a12" stroke-width="1" />
+                                            <text x="16" y="60" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Top-K</text>
+                                            {#if efResult?.current_portfolio}
+                                                <circle cx="6" cy="74" r="5" fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.2" />
+                                                <text x="16" y="78" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Your portfolio</text>
+                                            {/if}
+                                        </g>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            {#if selectedSamplerPoint}
+                                <div class="selectionPanel">
+                                    <div class="selectionHead">
+                                        <div class="panelLabel">Selected portfolio composition</div>
+                                        <button class="btn ghost xsmall" on:click={() => (selectedSamplerPoint = null)}>Clear</button>
+                                    </div>
+                                    <div class="selectionPills">
+                                        {#each selectedSamplerPoint.tickers as t, k}
+                                            <span class="samplerPill mono">
+                                                {t}
+                                                <span class="samplerPillWeight">{formatPct(selectedSamplerPoint.weights[k])}</span>
+                                            </span>
+                                        {/each}
+                                    </div>
+                                    <div class="selectionStats">
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Ann. return</div>
+                                            <div class="mcStatValue mono {pnlClass(selectedSamplerPoint.expected_return)}">{formatPct(selectedSamplerPoint.expected_return)}</div>
+                                        </div>
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Ann. volatility</div>
+                                            <div class="mcStatValue mono">{formatPct(selectedSamplerPoint.volatility)}</div>
+                                        </div>
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Sharpe</div>
+                                            <div class="mcStatValue mono {sharpeClass(selectedSamplerPoint.sharpe)}">{selectedSamplerPoint.sharpe.toFixed(2)}</div>
+                                        </div>
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Avg correlation</div>
+                                            <div class="mcStatValue mono {selectedSamplerPoint.avg_correlation > 0.7 ? 'redText' : selectedSamplerPoint.avg_correlation < 0.3 ? 'greenText' : ''}">{selectedSamplerPoint.avg_correlation.toFixed(2)}</div>
+                                        </div>
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Composite score</div>
+                                            <div class="mcStatValue mono bold">{selectedSamplerPoint.composite_score.toFixed(2)}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            {/if}
+
+                            <div class="samplerToolbar">
+                                <div class="rankSwitch">
+                                    <button class="switchBtn" class:active={samplerRankBy === "composite"} on:click={() => (samplerRankBy = "composite")}>
+                                        Rank by composite
+                                    </button>
+                                    <button class="switchBtn" class:active={samplerRankBy === "sharpe"} on:click={() => (samplerRankBy = "sharpe")}>
+                                        Rank by Sharpe
+                                    </button>
+                                </div>
+                                <div class="soft xsmall mono">
+                                    {samplerResult.n_simulations_evaluated} unique portfolios evaluated · {samplerResult.n_simulations_failed} skipped · click any point for composition
+                                </div>
+                            </div>
+
+                            <div class="tableWrap">
+                                <table class="kittTable xsmallTable">
+                                    <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Tickers (weights)</th>
+                                        <th>Ann. return</th>
+                                        <th>Ann. vol</th>
+                                        <th>Sharpe</th>
+                                        <th>Avg ρ</th>
+                                        <th>Composite</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each topList as p, i}
+                                        <tr>
+                                            <td><span class="mono bold">#{i+1}</span></td>
+                                            <td>
+                                                {#each p.tickers as t, k}
+                                                    <span class="samplerPill mono">
+                                                        {t}
+                                                        <span class="samplerPillWeight">{formatPct(p.weights[k])}</span>
+                                                    </span>
+                                                {/each}
+                                            </td>
+                                            <td><span class="mono {pnlClass(p.expected_return)}">{formatPct(p.expected_return)}</span></td>
+                                            <td><span class="mono">{formatPct(p.volatility)}</span></td>
+                                            <td><span class="mono {sharpeClass(p.sharpe)}">{p.sharpe.toFixed(2)}</span></td>
+                                            <td><span class="mono {p.avg_correlation > 0.7 ? 'redText' : p.avg_correlation < 0.3 ? 'greenText' : ''}">{p.avg_correlation.toFixed(2)}</span></td>
+                                            <td><span class="mono bold">{p.composite_score.toFixed(2)}</span></td>
+                                        </tr>
+                                    {/each}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="mcFootnote soft">
+                                {samplerResult.optimization === "max_sharpe" ? "Max-Sharpe (long-only Markowitz) weights" : "Equal-weight 1/N"} · Rf = {formatPct(samplerResult.risk_free_rate)} · λ = {samplerResult.diversification_weight} · {samplerResult.start_date_used} → {samplerResult.end_date_used}
+                                {#if Object.keys(samplerResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(samplerResult.errors).slice(0, 8).join(", ")}{Object.keys(samplerResult.errors).length > 8 ? "…" : ""}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingSampler}
+                            <div class="emptyState">Click "Run sampler" to draw {samplerNSimulations} random {samplerPortfolioSize}-asset portfolios from your referential and rank them by composite score.</div>
+                        {/if}
+                    </div>
+
                     <!-- MONTE CARLO SIMULATION -->
                     <div class="mcSection">
                         <div class="sectionTitle">Monte Carlo · Portfolio Trajectories</div>
@@ -2675,6 +3059,82 @@
         color: rgba(235, 235, 245, 0.6);
         margin-bottom: 6px;
         padding-left: 4px;
+    }
+
+    .samplerToolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 14px 0 8px 0;
+        flex-wrap: wrap;
+    }
+
+    .rankSwitch {
+        display: inline-flex;
+        gap: 0;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 0, 60, 0.22);
+        overflow: hidden;
+        background: rgba(0, 0, 0, 0.22);
+    }
+
+    .samplerPill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 2px 4px 2px 0;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(0, 212, 255, 0.10);
+        border: 1px solid rgba(0, 212, 255, 0.30);
+        font-size: 11px;
+        color: rgba(235, 245, 255, 0.92);
+    }
+
+    .samplerPillWeight {
+        font-size: 10px;
+        color: rgba(235, 245, 255, 0.6);
+        background: rgba(0, 0, 0, 0.25);
+        padding: 0 5px;
+        border-radius: 6px;
+    }
+
+    .clickablePoint {
+        cursor: pointer;
+        transition: transform 100ms ease, filter 100ms ease;
+    }
+
+    .clickablePoint:hover {
+        filter: brightness(1.35);
+    }
+
+    .selectionPanel {
+        margin-top: 14px;
+        padding: 14px 16px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        border-radius: 12px;
+    }
+
+    .selectionHead {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+
+    .selectionPills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px;
+        margin-bottom: 12px;
+    }
+
+    .selectionStats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
     }
 
     .bold {

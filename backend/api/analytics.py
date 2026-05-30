@@ -53,6 +53,8 @@ HEALTH_CACHE = TTLCache(maxsize=500, ttl=600)
 
 EF_CACHE = TTLCache(maxsize=200, ttl=600)
 
+SAMPLER_CACHE = TTLCache(maxsize=100, ttl=600)
+
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
     "1Y": 365, "2Y": 730, "3Y": 1095,
@@ -377,6 +379,60 @@ class EfficientFrontierResponse(BaseModel):
     max_sharpe: PortfolioOnFrontier
     current_portfolio: Optional[PortfolioOnFrontier] = None
     errors: Dict[str, str] = Field(default_factory=dict)
+
+
+SamplerOptimization = Literal["max_sharpe", "equal_weight"]
+
+
+class SampledPortfolio(BaseModel):
+    tickers: List[str]
+    weights: List[float]
+    expected_return: float
+    volatility: float
+    sharpe: float
+    avg_correlation: float
+    composite_score: float
+
+
+class SamplerCloudPoint(BaseModel):
+    volatility: float
+    expected_return: float
+    sharpe: float
+    avg_correlation: float
+    composite_score: float
+    tickers: List[str]
+    weights: List[float]
+
+
+class PortfolioSamplerResponse(BaseModel):
+    universe: List[str]
+    portfolio_size: int
+    n_simulations_requested: int
+    n_simulations_evaluated: int
+    n_simulations_failed: int
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    risk_free_rate: float
+    diversification_weight: float
+    optimization: SamplerOptimization
+    top_by_composite: List[SampledPortfolio]
+    top_by_sharpe: List[SampledPortfolio]
+    cloud: List[SamplerCloudPoint]
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class PortfolioSamplerRequest(BaseModel):
+    tickers: List[str] = Field(min_length=2, max_length=300)
+    portfolio_size: int = Field(default=5, ge=2, le=20)
+    n_simulations: int = Field(default=200, ge=10, le=5000)
+    top_k: int = Field(default=5, ge=1, le=50)
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
+    diversification_weight: float = Field(default=0.5, ge=0.0, le=5.0)
+    optimization: SamplerOptimization = "max_sharpe"
+    seed: int = 42
 
 
 class EfficientFrontierRequest(BaseModel):
@@ -2449,6 +2505,234 @@ def yahoo_efficient_frontier_post(req: EfficientFrontierRequest):
             auto_adjust=req.auto_adjust,
             risk_free_rate=req.risk_free_rate,
             n_points=req.n_points,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# Random portfolio sampler (top-K by composite return/risk + diversification)
+# =========================
+
+def _avg_off_diag_correlation(corr_mat: np.ndarray) -> float:
+    n = corr_mat.shape[0]
+    if n < 2:
+        return 0.0
+    iu = np.triu_indices(n, k=1)
+    vals = corr_mat[iu]
+    return float(np.nanmean(vals)) if vals.size else 0.0
+
+
+def _optimize_subset(
+    mu_sub: np.ndarray,
+    cov_sub: np.ndarray,
+    rf: float,
+    mode: str,
+) -> Optional[np.ndarray]:
+    n = len(mu_sub)
+    if mode == "equal_weight":
+        return np.full(n, 1.0 / n)
+
+    # max_sharpe
+    w0 = np.full(n, 1.0 / n)
+    bounds = [(0.0, 1.0)] * n
+    constraints = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
+
+    def neg_sharpe(w):
+        ret = float(np.dot(w, mu_sub))
+        var = float(w @ cov_sub @ w)
+        vol = float(np.sqrt(max(var, 1e-18)))
+        return -(ret - rf) / vol if vol > 0 else 0.0
+
+    res = minimize(
+        neg_sharpe, w0, method="SLSQP",
+        bounds=bounds, constraints=constraints,
+        options={"maxiter": 150, "ftol": 1e-9, "disp": False},
+    )
+    return res.x if res.success else None
+
+
+def _run_portfolio_sampler(
+    tickers: List[str],
+    portfolio_size: int,
+    n_simulations: int,
+    top_k: int,
+    lookback_period: str,
+    auto_adjust: bool,
+    risk_free_rate: float,
+    diversification_weight: float,
+    optimization: str,
+    seed: int,
+) -> Dict[str, Any]:
+    # de-dup tickers while preserving order
+    seen: set = set()
+    uniq_tickers: List[str] = []
+    for t in tickers:
+        if t and t not in seen:
+            seen.add(t)
+            uniq_tickers.append(t)
+
+    if len(uniq_tickers) < portfolio_size:
+        raise ValueError(
+            f"Need at least {portfolio_size} unique tickers in the universe (got {len(uniq_tickers)})"
+        )
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    cache_key = (
+        "sampler",
+        tuple(uniq_tickers),
+        int(portfolio_size),
+        int(n_simulations),
+        int(top_k),
+        lookback_period,
+        auto_adjust,
+        round(float(risk_free_rate), 6),
+        round(float(diversification_weight), 6),
+        optimization,
+        int(seed),
+        end_ts.date().isoformat(),
+    )
+    if cache_key in SAMPLER_CACHE:
+        return SAMPLER_CACHE[cache_key]
+
+    close = _download_close_daily_multi(uniq_tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    available = [t for t in uniq_tickers if t in close.columns]
+    errors: Dict[str, str] = {
+        t: "Ticker not found in downloaded data"
+        for t in uniq_tickers if t not in close.columns
+    }
+    if len(available) < portfolio_size:
+        raise ValueError(
+            f"Only {len(available)} tickers have price data, need at least {portfolio_size}"
+        )
+
+    # Drop tickers with too few observations on their own
+    raw = close[available]
+    # Compute per-ticker observation count after dropping NaNs on each column
+    valid_tickers = [t for t in available if raw[t].dropna().shape[0] >= 60]
+    if len(valid_tickers) < portfolio_size:
+        raise ValueError(
+            f"Only {len(valid_tickers)} tickers have >=60 daily observations, need {portfolio_size}"
+        )
+    extra_drop = set(available) - set(valid_tickers)
+    for t in extra_drop:
+        errors[t] = "Less than 60 daily observations"
+
+    # Precompute log-returns for the full universe (per-ticker NaNs preserved)
+    prices_full = close[valid_tickers]
+    log_rets_full = np.log(prices_full / prices_full.shift(1))
+
+    ann_factor = 252.0
+    rng = np.random.default_rng(seed)
+    n_universe = len(valid_tickers)
+
+    drawn_combos: set = set()
+    cloud: List[Dict[str, float]] = []
+    portfolios: List[Dict[str, Any]] = []
+    n_failed = 0
+
+    # Hard ceiling on draws to avoid infinite loops if dedup keeps colliding
+    max_attempts = max(n_simulations * 5, 100)
+    attempts = 0
+
+    while len(cloud) + n_failed < n_simulations and attempts < max_attempts:
+        attempts += 1
+        idx = rng.choice(n_universe, size=portfolio_size, replace=False)
+        idx_key = frozenset(int(i) for i in idx)
+        if idx_key in drawn_combos:
+            continue
+        drawn_combos.add(idx_key)
+
+        sub_tickers = [valid_tickers[i] for i in idx]
+        sub_rets = log_rets_full[sub_tickers].dropna(how="any")
+        if len(sub_rets) < 20:
+            n_failed += 1
+            continue
+
+        mu_sub = sub_rets.mean().to_numpy() * ann_factor
+        cov_sub = sub_rets.cov().to_numpy() * ann_factor
+
+        w = _optimize_subset(mu_sub, cov_sub, float(risk_free_rate), optimization)
+        if w is None:
+            n_failed += 1
+            continue
+
+        ret = float(np.dot(w, mu_sub))
+        var = float(w @ cov_sub @ w)
+        vol = float(np.sqrt(max(var, 0.0)))
+        sharpe = ((ret - float(risk_free_rate)) / vol) if vol > 0 else 0.0
+
+        corr_mat = sub_rets.corr().to_numpy()
+        avg_corr = _avg_off_diag_correlation(corr_mat)
+
+        composite = float(sharpe - float(diversification_weight) * avg_corr)
+
+        cloud.append({
+            "volatility": vol,
+            "expected_return": ret,
+            "sharpe": sharpe,
+            "avg_correlation": avg_corr,
+            "composite_score": composite,
+            "tickers": sub_tickers,
+            "weights": [float(x) for x in w.tolist()],
+        })
+        portfolios.append({
+            "tickers": sub_tickers,
+            "weights": [float(x) for x in w.tolist()],
+            "expected_return": ret,
+            "volatility": vol,
+            "sharpe": sharpe,
+            "avg_correlation": avg_corr,
+            "composite_score": composite,
+        })
+
+    if not portfolios:
+        raise ValueError("No valid portfolio could be evaluated")
+
+    top_composite = sorted(portfolios, key=lambda p: p["composite_score"], reverse=True)[:top_k]
+    top_sharpe = sorted(portfolios, key=lambda p: p["sharpe"], reverse=True)[:top_k]
+
+    out = {
+        "universe": valid_tickers,
+        "portfolio_size": int(portfolio_size),
+        "n_simulations_requested": int(n_simulations),
+        "n_simulations_evaluated": int(len(portfolios)),
+        "n_simulations_failed": int(n_failed),
+        "observations": int(log_rets_full.dropna(how="any").shape[0]),
+        "start_date_used": prices_full.dropna(how="all").index[0].date().isoformat(),
+        "end_date_used": prices_full.dropna(how="all").index[-1].date().isoformat(),
+        "risk_free_rate": float(risk_free_rate),
+        "diversification_weight": float(diversification_weight),
+        "optimization": optimization,
+        "top_by_composite": top_composite,
+        "top_by_sharpe": top_sharpe,
+        "cloud": cloud,
+        "errors": errors,
+    }
+    SAMPLER_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/portfolio-sampler", response_model=PortfolioSamplerResponse)
+def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest):
+    try:
+        return _run_portfolio_sampler(
+            tickers=req.tickers,
+            portfolio_size=req.portfolio_size,
+            n_simulations=req.n_simulations,
+            top_k=req.top_k,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            risk_free_rate=req.risk_free_rate,
+            diversification_weight=req.diversification_weight,
+            optimization=req.optimization,
+            seed=req.seed,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
