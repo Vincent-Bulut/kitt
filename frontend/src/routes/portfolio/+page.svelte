@@ -173,6 +173,38 @@
     let isFetchingMC = false;
     let mcError = "";
 
+    type CorrelationPair = {
+        ticker_a: string;
+        ticker_b: string;
+        correlation: number;
+    };
+
+    type CorrelationStats = {
+        avg_correlation: number;
+        weighted_avg_correlation: number | null;
+        min_pair: CorrelationPair | null;
+        max_pair: CorrelationPair | null;
+        pct_pairs_above_0_7: number;
+        pct_pairs_below_0_3: number;
+        diversification_score: number;
+        n_pairs: number;
+    };
+
+    type CorrelationResult = {
+        tickers: string[];
+        matrix: number[][];
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        stats: CorrelationStats;
+        errors: Record<string, string>;
+    };
+
+    let corrResult: CorrelationResult | null = null;
+    let corrLookback = "3Y";
+    let isFetchingCorr = false;
+    let corrError = "";
+
     let form = {
         symbol: "",
         date: "",
@@ -327,6 +359,58 @@
         } finally {
             isFetchingMC = false;
         }
+    }
+
+    async function runCorrelation() {
+        if (!positionView || positionView.rows.length < 2) {
+            corrError = "Need at least 2 positions to compute correlations.";
+            corrResult = null;
+            return;
+        }
+        isFetchingCorr = true;
+        corrError = "";
+        try {
+            const tickers = positionView.rows.map(r => r.symbol);
+            const weights = positionView.rows.map(r => r.weight ?? 0);
+            const hasWeights = weights.some(w => w > 0);
+            const payload: Record<string, any> = {
+                tickers,
+                lookback_period: corrLookback,
+                auto_adjust: true,
+                return_mode: "log"
+            };
+            if (hasWeights) payload.weights = weights;
+            const res = await instance.post<CorrelationResult>("/analytics/yahoo/correlation", payload);
+            corrResult = res.data;
+        } catch (err: any) {
+            corrError = err?.response?.data?.detail || err?.message || "Unable to compute correlations.";
+            corrResult = null;
+        } finally {
+            isFetchingCorr = false;
+        }
+    }
+
+    function corrCellColor(v: number): string {
+        // Blue (-1) -> white (0) -> red (+1)
+        const c = Math.max(-1, Math.min(1, v));
+        if (c >= 0) {
+            // white -> red
+            const r = 255;
+            const g = Math.round(255 * (1 - c));
+            const b = Math.round(255 * (1 - c));
+            return `rgba(${r}, ${g}, ${b}, ${0.18 + 0.55 * c})`;
+        } else {
+            // white -> blue
+            const r = Math.round(255 * (1 + c));
+            const g = Math.round(255 * (1 + c));
+            const b = 255;
+            return `rgba(${r}, ${g}, ${b}, ${0.18 + 0.55 * (-c)})`;
+        }
+    }
+
+    function corrTextColor(v: number): string {
+        const a = Math.abs(v);
+        return a > 0.5 ? "#0a0a12" : "rgba(255,255,255,0.85)";
     }
 
     async function createTransaction() {
@@ -1035,6 +1119,120 @@
                             {/if}
                         {/each}
                     {/if}
+
+                    <!-- CORRELATION MATRIX -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Correlation Matrix · Diversification</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={corrLookback}>
+                                    <option value="6M">6 Months</option>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <button class="btn primary xsmall" on:click={runCorrelation}
+                                    disabled={isFetchingCorr || !positionView || positionView.rows.length < 2}>
+                                {isFetchingCorr ? "Computing…" : "Compute correlations"}
+                            </button>
+                        </div>
+
+                        {#if corrError}
+                            <div class="errorBox">{corrError}</div>
+                        {/if}
+
+                        {#if corrResult}
+                            <div class="corrLayout">
+                                <div class="corrMatrixWrap">
+                                    <table class="corrMatrix">
+                                        <thead>
+                                        <tr>
+                                            <th></th>
+                                            {#each corrResult.tickers as t}
+                                                <th class="corrTickerHead"><span class="mono">{t}</span></th>
+                                            {/each}
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        {#each corrResult.tickers as rowTicker, i}
+                                            <tr>
+                                                <th class="corrTickerHead rowHead"><span class="mono">{rowTicker}</span></th>
+                                                {#each corrResult.tickers as colTicker, j}
+                                                    <td class="corrCell"
+                                                        style="background: {corrCellColor(corrResult.matrix[i][j])}; color: {corrTextColor(corrResult.matrix[i][j])};"
+                                                        title="{rowTicker} ↔ {colTicker}: {corrResult.matrix[i][j].toFixed(3)}">
+                                                        <span class="mono">{corrResult.matrix[i][j].toFixed(2)}</span>
+                                                    </td>
+                                                {/each}
+                                            </tr>
+                                        {/each}
+                                        </tbody>
+                                    </table>
+                                    <div class="corrLegend">
+                                        <span class="corrLegendItem"><span class="corrSwatch" style="background: {corrCellColor(-1)};"></span> −1.00</span>
+                                        <span class="corrLegendItem"><span class="corrSwatch" style="background: {corrCellColor(0)};"></span> 0.00</span>
+                                        <span class="corrLegendItem"><span class="corrSwatch" style="background: {corrCellColor(1)};"></span> +1.00</span>
+                                    </div>
+                                </div>
+
+                                <div class="corrStatsPanel">
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Diversification score</div>
+                                        <div class="mcStatValue mono {corrResult.stats.diversification_score > 0.6 ? 'greenText' : corrResult.stats.diversification_score < 0.3 ? 'redText' : ''}">{formatPct(corrResult.stats.diversification_score)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Avg correlation</div>
+                                        <div class="mcStatValue mono">{corrResult.stats.avg_correlation.toFixed(3)}</div>
+                                    </div>
+                                    {#if corrResult.stats.weighted_avg_correlation !== null}
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Weighted avg (by holdings)</div>
+                                            <div class="mcStatValue mono">{corrResult.stats.weighted_avg_correlation.toFixed(3)}</div>
+                                        </div>
+                                    {/if}
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Pairs &gt; 0.70</div>
+                                        <div class="mcStatValue mono {corrResult.stats.pct_pairs_above_0_7 > 0.5 ? 'redText' : ''}">{formatPct(corrResult.stats.pct_pairs_above_0_7)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Pairs &lt; 0.30</div>
+                                        <div class="mcStatValue mono {corrResult.stats.pct_pairs_below_0_3 > 0.5 ? 'greenText' : ''}">{formatPct(corrResult.stats.pct_pairs_below_0_3)}</div>
+                                    </div>
+                                    {#if corrResult.stats.max_pair}
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Most correlated</div>
+                                            <div class="mcStatValue mono redText">
+                                                {corrResult.stats.max_pair.ticker_a} ↔ {corrResult.stats.max_pair.ticker_b}
+                                            </div>
+                                            <div class="mono soft xsmall">{corrResult.stats.max_pair.correlation.toFixed(3)}</div>
+                                        </div>
+                                    {/if}
+                                    {#if corrResult.stats.min_pair}
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Least correlated</div>
+                                            <div class="mcStatValue mono greenText">
+                                                {corrResult.stats.min_pair.ticker_a} ↔ {corrResult.stats.min_pair.ticker_b}
+                                            </div>
+                                            <div class="mono soft xsmall">{corrResult.stats.min_pair.correlation.toFixed(3)}</div>
+                                        </div>
+                                    {/if}
+                                </div>
+                            </div>
+
+                            <div class="mcFootnote soft">
+                                {corrResult.observations} daily log-return observations · {corrResult.start_date_used} → {corrResult.end_date_used} · {corrResult.stats.n_pairs} unique pairs
+                                {#if Object.keys(corrResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(corrResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingCorr}
+                            <div class="emptyState">Click "Compute correlations" to build the asset correlation heatmap over the last {corrLookback}.</div>
+                        {/if}
+                    </div>
 
                     <!-- MONTE CARLO SIMULATION -->
                     <div class="mcSection">
@@ -1772,6 +1970,96 @@
     .mcFootnote {
         margin-top: 12px;
         font-size: 11px;
+    }
+
+    .corrLayout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 280px;
+        gap: 16px;
+        margin-top: 8px;
+        align-items: start;
+    }
+
+    @media (max-width: 1100px) {
+        .corrLayout {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .corrMatrixWrap {
+        background: rgba(0, 0, 0, 0.18);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 12px;
+        padding: 12px;
+        overflow: auto;
+        max-width: 100%;
+    }
+
+    .corrMatrix {
+        border-collapse: separate;
+        border-spacing: 2px;
+        font-family: ui-monospace, monospace;
+    }
+
+    .corrMatrix th,
+    .corrMatrix td {
+        padding: 6px 8px;
+        text-align: center;
+        font-size: 11px;
+    }
+
+    .corrTickerHead {
+        color: rgba(235, 235, 245, 0.75);
+        background: rgba(255, 0, 60, 0.06);
+        border-radius: 4px;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .corrTickerHead.rowHead {
+        text-align: right;
+        background: rgba(255, 0, 60, 0.04);
+    }
+
+    .corrCell {
+        border-radius: 4px;
+        min-width: 48px;
+        cursor: default;
+        transition: transform 100ms ease;
+    }
+
+    .corrCell:hover {
+        transform: scale(1.06);
+        outline: 1px solid rgba(255, 255, 255, 0.45);
+    }
+
+    .corrLegend {
+        display: flex;
+        gap: 18px;
+        margin-top: 12px;
+        font-size: 11px;
+        color: rgba(235, 235, 245, 0.6);
+        font-family: ui-monospace, monospace;
+    }
+
+    .corrLegendItem {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .corrSwatch {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    .corrStatsPanel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
     }
 
     .bold {

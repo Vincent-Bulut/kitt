@@ -46,6 +46,8 @@ RISK_CACHE = TTLCache(maxsize=2000, ttl=600)
 
 MC_CACHE = TTLCache(maxsize=500, ttl=600)
 
+CORR_CACHE = TTLCache(maxsize=500, ttl=600)
+
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
     "1Y": 365, "2Y": 730, "3Y": 1095,
@@ -286,6 +288,41 @@ class MonteCarloRequest(BaseModel):
     seed: int = 42
     n_sample_paths: int = Field(default=30, ge=0, le=200)
     initial_value: float = Field(default=1.0, gt=0)
+
+
+class CorrelationPair(BaseModel):
+    ticker_a: str
+    ticker_b: str
+    correlation: float
+
+
+class CorrelationStats(BaseModel):
+    avg_correlation: float                # mean of upper-triangle (off-diagonal) values
+    weighted_avg_correlation: Optional[float] = None  # weighted by w_i * w_j on off-diagonal
+    min_pair: Optional[CorrelationPair] = None
+    max_pair: Optional[CorrelationPair] = None
+    pct_pairs_above_0_7: float            # share of pairs with corr > 0.7
+    pct_pairs_below_0_3: float            # share of pairs with corr < 0.3
+    diversification_score: float          # 1 - avg_correlation (clamped to [0,1])
+    n_pairs: int
+
+
+class CorrelationResponse(BaseModel):
+    tickers: List[str]
+    matrix: List[List[float]]             # square matrix, indexed by tickers
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    stats: CorrelationStats
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class CorrelationRequest(BaseModel):
+    tickers: List[str] = Field(min_length=2, max_length=100)
+    weights: Optional[List[float]] = None  # if provided, used for weighted avg correlation
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    return_mode: ReturnMode = "log"
 
 
 class YahooAllMetricsRequest(BaseModel):
@@ -1804,6 +1841,152 @@ def yahoo_monte_carlo_post(req: MonteCarloRequest):
             seed=req.seed,
             n_sample_paths=req.n_sample_paths,
             initial_value=req.initial_value,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# Correlation matrix
+# =========================
+
+def _run_correlation(
+    tickers: List[str],
+    weights: Optional[List[float]],
+    lookback_period: str,
+    auto_adjust: bool,
+    return_mode: ReturnMode,
+) -> Dict[str, Any]:
+    if len(tickers) < 2:
+        raise ValueError("At least 2 tickers are required to compute a correlation matrix")
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    norm_weights: Optional[np.ndarray] = None
+    if weights is not None:
+        if len(weights) != len(tickers):
+            raise ValueError("weights length must match tickers length")
+        w = np.array(weights, dtype=float)
+        if np.any(w < 0):
+            raise ValueError("weights must be non-negative")
+        s = w.sum()
+        if s > 0:
+            norm_weights = w / s
+
+    cache_key = (
+        "corr",
+        tuple(tickers),
+        None if norm_weights is None else tuple(round(float(x), 6) for x in norm_weights.tolist()),
+        lookback_period,
+        auto_adjust,
+        return_mode,
+        end_ts.date().isoformat(),
+    )
+    if cache_key in CORR_CACHE:
+        return CORR_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    available = [t for t in tickers if t in close.columns]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    if len(available) < 2:
+        raise ValueError("Need at least 2 tickers with price data to compute correlations")
+
+    # Re-align weights to available tickers (renormalize)
+    if norm_weights is not None:
+        keep_mask = np.array([t in close.columns for t in tickers])
+        w_kept = norm_weights[keep_mask]
+        s2 = w_kept.sum()
+        norm_weights = (w_kept / s2) if s2 > 0 else None
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 20:
+        raise ValueError("Not enough overlapping price observations (need >= 20)")
+
+    if return_mode == "log":
+        rets = np.log(prices / prices.shift(1)).dropna()
+    else:
+        rets = prices.pct_change().dropna()
+
+    if len(rets) < 10:
+        raise ValueError("Not enough return observations to compute correlations")
+
+    corr = rets.corr().reindex(index=available, columns=available)
+    corr_vals = corr.to_numpy()
+
+    n = len(available)
+    iu = np.triu_indices(n, k=1)  # upper triangle, off-diagonal
+    off_diag = corr_vals[iu]
+
+    avg_corr = float(np.nanmean(off_diag)) if off_diag.size else 0.0
+
+    weighted_avg: Optional[float] = None
+    if norm_weights is not None and norm_weights.size == n:
+        # Weighted off-diagonal mean: sum_{i<j} 2*w_i*w_j*rho_ij / sum_{i<j} 2*w_i*w_j
+        ww = np.outer(norm_weights, norm_weights)
+        num = float(np.nansum(ww[iu] * off_diag))
+        den = float(np.nansum(ww[iu]))
+        weighted_avg = float(num / den) if den > 0 else None
+
+    min_pair_obj: Optional[Dict[str, Any]] = None
+    max_pair_obj: Optional[Dict[str, Any]] = None
+    if off_diag.size:
+        flat_idx_min = int(np.nanargmin(off_diag))
+        flat_idx_max = int(np.nanargmax(off_diag))
+        i_min, j_min = iu[0][flat_idx_min], iu[1][flat_idx_min]
+        i_max, j_max = iu[0][flat_idx_max], iu[1][flat_idx_max]
+        min_pair_obj = {
+            "ticker_a": available[i_min],
+            "ticker_b": available[j_min],
+            "correlation": float(off_diag[flat_idx_min]),
+        }
+        max_pair_obj = {
+            "ticker_a": available[i_max],
+            "ticker_b": available[j_max],
+            "correlation": float(off_diag[flat_idx_max]),
+        }
+
+    n_pairs = int(off_diag.size)
+    pct_high = float(np.nansum(off_diag > 0.7) / n_pairs) if n_pairs else 0.0
+    pct_low = float(np.nansum(off_diag < 0.3) / n_pairs) if n_pairs else 0.0
+    diversification_score = float(max(0.0, min(1.0, 1.0 - avg_corr)))
+
+    out = {
+        "tickers": available,
+        "matrix": [[float(v) for v in row] for row in corr_vals],
+        "observations": int(len(rets)),
+        "start_date_used": rets.index[0].date().isoformat(),
+        "end_date_used": rets.index[-1].date().isoformat(),
+        "stats": {
+            "avg_correlation": avg_corr,
+            "weighted_avg_correlation": weighted_avg,
+            "min_pair": min_pair_obj,
+            "max_pair": max_pair_obj,
+            "pct_pairs_above_0_7": pct_high,
+            "pct_pairs_below_0_3": pct_low,
+            "diversification_score": diversification_score,
+            "n_pairs": n_pairs,
+        },
+        "errors": errors,
+    }
+    CORR_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/correlation", response_model=CorrelationResponse)
+def yahoo_correlation_post(req: CorrelationRequest):
+    try:
+        return _run_correlation(
+            tickers=req.tickers,
+            weights=req.weights,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            return_mode=req.return_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
