@@ -51,22 +51,15 @@
         <header class="header">
             <div class="headerTop">
                 <div>
-                    <h1 class="title">ANALYTICS TERMINAL</h1>
+                    <h1 class="title">ANALYTICS COCKPIT</h1>
                     <div class="subtitle">
                         Launch market analytics modules from a single cockpit.
                     </div>
                 </div>
 
                 <div class="statusWrap">
-                    <span class="status">LIVE</span>
                     <span class="status soft">Yahoo</span>
                 </div>
-            </div>
-
-            <div class="chipRow">
-                {#each chips as chip}
-                    <span class="chip">{chip}</span>
-                {/each}
             </div>
         </header>
 

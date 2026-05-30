@@ -1563,7 +1563,7 @@
 
                     <!-- EFFICIENT FRONTIER (Markowitz) -->
                     <div class="mcSection">
-                        <div class="sectionTitle">Markowitz · Efficient Frontier</div>
+                        <div class="sectionTitle">Portfolio Optimization</div>
                         <div class="mcControls">
                             <label class="field inlineField">
                                 <span class="label">Lookback</span>
@@ -1783,7 +1783,7 @@
 
                     <!-- CORRELATION MATRIX -->
                     <div class="mcSection">
-                        <div class="sectionTitle">Correlation Matrix · Diversification</div>
+                        <div class="sectionTitle">Diversification Analysis</div>
                         <div class="mcControls">
                             <label class="field inlineField">
                                 <span class="label">Lookback</span>
@@ -1897,7 +1897,7 @@
 
                     <!-- RANDOM PORTFOLIO SAMPLER -->
                     <div class="mcSection">
-                        <div class="sectionTitle">Random Portfolio Sampler · Top-K Discovery</div>
+                        <div class="sectionTitle">Portfolio Discovery</div>
                         <div class="mcControls">
                             <label class="field inlineField">
                                 <span class="label">Portfolio size</span>
@@ -2145,7 +2145,7 @@
 
                     <!-- MONTE CARLO SIMULATION -->
                     <div class="mcSection">
-                        <div class="sectionTitle">Monte Carlo · Portfolio Trajectories</div>
+                        <div class="sectionTitle">Monte Carlo · Risk Simulation</div>
                         <div class="mcControls">
                             <label class="field inlineField">
                                 <span class="label">Horizon (trading days)</span>

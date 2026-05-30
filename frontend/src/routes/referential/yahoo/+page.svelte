@@ -178,7 +178,7 @@
             <div class="headerGrid">
                 <!-- LEFT -->
                 <div class="headerLeft">
-                    <h1 class="title">ASSET TERMINAL</h1>
+                    <h1 class="title">ASSETS COCKPIT</h1>
                     <div class="subtitle">{filteredAssets.length} asset(s) shown</div>
 
                     <div class="searchWrap">

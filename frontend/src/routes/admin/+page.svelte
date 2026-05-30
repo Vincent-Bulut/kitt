@@ -113,7 +113,7 @@
         <div class="header">
             <div class="headerTop">
                 <div>
-                    <h1 class="title">PORTFOLIO TERMINAL</h1>
+                    <h1 class="title">PORTFOLIO COCKPIT</h1>
                     <div class="subtitle">{sorted.length} portfolio(s) shown</div>
                 </div>
 

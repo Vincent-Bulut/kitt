@@ -312,13 +312,12 @@
         <header class="header">
             <div class="headerTop">
                 <div>
-                    <h1 class="title">ALL ANALYTICS — ONE COCKPIT</h1>
+                    <h1 class="title">ALL ANALYTICS COCKPIT</h1>
                     <div class="subtitle">
                         Single form, parallel fetch across all 6 analytics modules.
                     </div>
                 </div>
                 <div class="statusWrap">
-                    <span class="status">LIVE</span>
                     <span class="status soft">Yahoo</span>
                 </div>
             </div>
