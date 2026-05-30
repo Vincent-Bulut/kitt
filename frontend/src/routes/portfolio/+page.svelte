@@ -1,7 +1,7 @@
 <script lang="ts">
-    import { instance } from "$lib/axiosAPI.js";
-    import { onMount } from "svelte";
-    import { page } from "$app/stores";
+    import {instance} from "$lib/axiosAPI.js";
+    import {onMount} from "svelte";
+    import {page} from "$app/stores";
 
     type Portfolio = { id: number; name: string };
     type Asset = { symbol: string; name: string; isin: string; currency: string };
@@ -164,6 +164,29 @@
         tickers: string[];
         weights: number[];
         errors: Record<string, string>;
+    };
+
+    type VaREsPoint = {
+        confidence_level: number;
+        var_historical: number;
+        es_historical: number;
+        var_gaussian: number;
+        es_gaussian: number;
+        var_cornish_fisher: number;
+        es_cf_empirical_tail: number;
+    };
+
+    type VaREsRow = {
+        ticker: string;
+        start_date_requested: string;
+        end_date_requested: string;
+        start_date_used: string;
+        end_date_used: string;
+        observations: number;
+        return_mode: "arith" | "log";
+        horizon: string;
+        price_type: string;
+        points: VaREsPoint[];
     };
 
     let mcResult: MonteCarloResult | null = null;
@@ -352,11 +375,11 @@
             Number.isFinite(a) && a > 0
                 ? a
                 : Number.isFinite(q) && Number.isFinite(p) && q > 0 && p > 0
-                ? q * p
-                : 0;
+                    ? q * p
+                    : 0;
         if (montant > 0) {
-            const next = computeFee(montant);
-            if (form.transaction_fee !== next) form.transaction_fee = next as any;
+            const next = computeFee(montant).toString();
+            if (form.transaction_fee !== next) form.transaction_fee = next;
         }
     }
 
@@ -517,7 +540,7 @@
     // Sampler scatter chart geometry
     const SAMP_W = 960;
     const SAMP_H = 420;
-    const SAMP_PAD = { top: 24, right: 24, bottom: 44, left: 64 };
+    const SAMP_PAD = {top: 24, right: 24, bottom: 44, left: 64};
 
     function getSamplerChartData(r: PortfolioSamplerResult | null) {
         if (!r || r.cloud.length === 0) return null;
@@ -541,11 +564,11 @@
         const yTicks: { value: number; y: number }[] = [];
         for (let i = 0; i <= 5; i++) {
             const vx = xMin + ((xMax - xMin) * i) / 5;
-            xTicks.push({ value: vx, x: xAt(vx) });
+            xTicks.push({value: vx, x: xAt(vx)});
             const vy = yMin + ((yMax - yMin) * i) / 5;
-            yTicks.push({ value: vy, y: yAt(vy) });
+            yTicks.push({value: vy, y: yAt(vy)});
         }
-        return { xAt, yAt, xMin, xMax, yMin, yMax, xTicks, yTicks };
+        return {xAt, yAt, xMin, xMax, yMin, yMax, xTicks, yTicks};
     }
 
     function selectSamplerPointOnKey(e: KeyboardEvent, pt: SamplerCloudPoint) {
@@ -604,14 +627,20 @@
     // Efficient frontier chart geometry
     const EF_W = 960;
     const EF_H = 420;
-    const EF_PAD = { top: 24, right: 24, bottom: 44, left: 64 };
+    const EF_PAD = {top: 24, right: 24, bottom: 44, left: 64};
 
     function getEFChartData(r: EfficientFrontierResult | null) {
         if (!r) return null;
         const allX: number[] = [];
         const allY: number[] = [];
-        r.frontier.forEach(p => { allX.push(p.volatility); allY.push(p.expected_return); });
-        r.assets.forEach(a => { allX.push(a.volatility); allY.push(a.expected_return); });
+        r.frontier.forEach(p => {
+            allX.push(p.volatility);
+            allY.push(p.expected_return);
+        });
+        r.assets.forEach(a => {
+            allX.push(a.volatility);
+            allY.push(a.expected_return);
+        });
         allX.push(r.min_variance.volatility, r.max_sharpe.volatility);
         allY.push(r.min_variance.expected_return, r.max_sharpe.expected_return);
         if (r.current_portfolio) {
@@ -644,16 +673,16 @@
         const slope = r.max_sharpe.sharpe;
         const cmlX2 = xMax;
         const cmlY2 = r.risk_free_rate + slope * cmlX2;
-        const cml = { x1: xAt(0), y1: yAt(r.risk_free_rate), x2: xAt(cmlX2), y2: yAt(cmlY2) };
+        const cml = {x1: xAt(0), y1: yAt(r.risk_free_rate), x2: xAt(cmlX2), y2: yAt(cmlY2)};
 
         // Y/X ticks (5)
         const xTicks: { value: number; x: number }[] = [];
         const yTicks: { value: number; y: number }[] = [];
         for (let i = 0; i <= 5; i++) {
             const vx = xMin + ((xMax - xMin) * i) / 5;
-            xTicks.push({ value: vx, x: xAt(vx) });
+            xTicks.push({value: vx, x: xAt(vx)});
             const vy = yMin + ((yMax - yMin) * i) / 5;
-            yTicks.push({ value: vy, y: yAt(vy) });
+            yTicks.push({value: vy, y: yAt(vy)});
         }
 
         return {
@@ -864,12 +893,12 @@
     // SVG Helpers
     const CHART_W = 360;
     const CHART_H = 100;
-    const CHART_PAD = { top: 10, right: 10, bottom: 20, left: 40 };
+    const CHART_PAD = {top: 10, right: 10, bottom: 20, left: 40};
 
     // Monte Carlo chart dimensions (full-width, taller)
     const MC_W = 960;
     const MC_H = 380;
-    const MC_PAD = { top: 20, right: 60, bottom: 28, left: 70 };
+    const MC_PAD = {top: 20, right: 60, bottom: 28, left: 70};
 
     function buildLinePath(points: { x: number; y: number }[]) {
         if (points.length < 2) return "";
@@ -889,7 +918,7 @@
         const minVal = Math.min(...pts.map(p => p.cum_return));
         const maxVal = Math.max(...pts.map(p => p.cum_return));
         const range = maxVal - minVal || 0.1;
-        
+
         const chartPoints = pts.map((p, i) => ({
             x: CHART_PAD.left + (i / (pts.length - 1)) * (CHART_W - CHART_PAD.left - CHART_PAD.right),
             y: CHART_H - CHART_PAD.bottom - ((p.cum_return - minVal) / range) * (CHART_H - CHART_PAD.top - CHART_PAD.bottom)
@@ -904,7 +933,7 @@
             minVal,
             maxVal,
             baselineY,
-            lastVal: pts[pts.length-1].cum_return
+            lastVal: pts[pts.length - 1].cum_return
         };
     }
 
@@ -932,7 +961,7 @@
 
     function getMonteCarloChartData(result: MonteCarloResult | null) {
         if (!result) return null;
-        const { percentiles, samples, stats } = result;
+        const {percentiles, samples, stats} = result;
         const n = percentiles.p5.length;
         if (n < 2) return null;
 
@@ -956,7 +985,7 @@
         const yAt = (v: number) => MC_PAD.top + (1 - (v - yMin) / range) * innerH;
 
         const toPath = (arr: number[]) =>
-            buildLinePath(arr.map((v, i) => ({ x: xAt(i), y: yAt(v) })));
+            buildLinePath(arr.map((v, i) => ({x: xAt(i), y: yAt(v)})));
 
         const bandPath = (lower: number[], upper: number[]) => {
             const top = upper.map((v, i) => `${xAt(i)} ${yAt(v)}`);
@@ -971,14 +1000,14 @@
         const tickValues: { value: number; y: number }[] = [];
         for (let i = 0; i <= yTicks; i++) {
             const v = yMin + (range * i) / yTicks;
-            tickValues.push({ value: v, y: yAt(v) });
+            tickValues.push({value: v, y: yAt(v)});
         }
 
         const xTickCount = Math.min(6, n);
         const xTicks: { date: string; x: number }[] = [];
         for (let i = 0; i < xTickCount; i++) {
             const idx = Math.round((i / (xTickCount - 1)) * (n - 1));
-            xTicks.push({ date: result.dates[idx] ?? "", x: xAt(idx) });
+            xTicks.push({date: result.dates[idx] ?? "", x: xAt(idx)});
         }
 
         return {
@@ -1036,7 +1065,8 @@
             <div class="topBar">
                 <label class="field">
                     <span class="label">Portfolio</span>
-                    <select class="input" bind:value={selectedPortfolioId} disabled={isLoadingPortfolios || portfolios.length === 0}>
+                    <select class="input" bind:value={selectedPortfolioId}
+                            disabled={isLoadingPortfolios || portfolios.length === 0}>
                         {#if portfolios.length === 0}
                             <option value={null}>No portfolios — create one in /admin</option>
                         {:else}
@@ -1073,7 +1103,8 @@
                 <div class="formGrid">
                     <label class="field">
                         <span class="label">Symbol</span>
-                        <input class="input mono" type="text" list="assetList" bind:value={form.symbol} placeholder="AAPL" />
+                        <input class="input mono" type="text" list="assetList" bind:value={form.symbol}
+                               placeholder="AAPL"/>
                         <datalist id="assetList">
                             {#each assets as a}
                                 <option value={a.symbol}>{a.name}</option>
@@ -1082,7 +1113,7 @@
                     </label>
                     <label class="field">
                         <span class="label">Date</span>
-                        <input class="input mono" type="date" bind:value={form.date} />
+                        <input class="input mono" type="date" bind:value={form.date}/>
                     </label>
                     <label class="field">
                         <span class="label">Side</span>
@@ -1093,23 +1124,28 @@
                     </label>
                     <label class="field">
                         <span class="label">Quantity</span>
-                        <input class="input mono" type="number" step="any" min="0" bind:value={form.quantity} placeholder="10" />
+                        <input class="input mono" type="number" step="any" min="0" bind:value={form.quantity}
+                               placeholder="10"/>
                     </label>
                     <label class="field">
                         <span class="label">Price</span>
-                        <input class="input mono" type="number" step="any" min="0" bind:value={form.price} placeholder="180.50" />
+                        <input class="input mono" type="number" step="any" min="0" bind:value={form.price}
+                               placeholder="180.50"/>
                     </label>
                     <label class="field">
                         <span class="label">Transaction fee</span>
-                        <input class="input mono" type="number" step="any" min="0" bind:value={form.transaction_fee} on:input={() => (feeManuallyEdited = true)} placeholder="auto" />
+                        <input class="input mono" type="number" step="any" min="0" bind:value={form.transaction_fee}
+                               on:input={() => (feeManuallyEdited = true)} placeholder="auto"/>
                     </label>
                     <label class="field">
                         <span class="label">Amount (optional)</span>
-                        <input class="input mono" type="number" step="any" bind:value={form.amount} placeholder="auto = qty × price" />
+                        <input class="input mono" type="number" step="any" bind:value={form.amount}
+                               placeholder="auto = qty × price"/>
                     </label>
                     <label class="field">
                         <span class="label">Currency (optional)</span>
-                        <input class="input mono" type="text" maxlength="3" bind:value={form.currency} placeholder="EUR" />
+                        <input class="input mono" type="text" maxlength="3" bind:value={form.currency}
+                               placeholder="EUR"/>
                     </label>
                 </div>
 
@@ -1121,7 +1157,8 @@
                 {/if}
 
                 <div class="actions">
-                    <button class="btn primary" type="button" on:click={createTransaction} disabled={isCreating || selectedPortfolioId === null}>
+                    <button class="btn primary" type="button" on:click={createTransaction}
+                            disabled={isCreating || selectedPortfolioId === null}>
                         {isCreating ? "Creating…" : "Create transaction"}
                     </button>
                 </div>
@@ -1211,12 +1248,19 @@
                                         </td>
                                         <td><span class="mono">{formatNum(row.market_value)}</span></td>
                                         <td><span class="mono">{formatPct(row.weight)}</span></td>
-                                        <td><span class="mono {pnlClass(row.realized_pnl)}">{formatNum(row.realized_pnl)}</span></td>
-                                        <td><span class="mono {pnlClass(row.unrealized_pnl)}">{formatNum(row.unrealized_pnl)}</span></td>
-                                        <td><span class="mono {pnlClass(row.total_pnl)}">{formatNum(row.total_pnl)}</span></td>
+                                        <td><span
+                                                class="mono {pnlClass(row.realized_pnl)}">{formatNum(row.realized_pnl)}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.unrealized_pnl)}">{formatNum(row.unrealized_pnl)}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.total_pnl)}">{formatNum(row.total_pnl)}</span>
+                                        </td>
                                         <td><span class="mono">{formatNum(row.total_fees)}</span></td>
                                         <td><span class="mono">{formatNum(row.estimated_ter_cost_annual)}</span></td>
-                                        <td><span class="mono">{formatPct(row.contribution_to_portfolio_pnl)}</span></td>
+                                        <td><span class="mono">{formatPct(row.contribution_to_portfolio_pnl)}</span>
+                                        </td>
                                         <td><span class="mono soft">{row.num_transactions}</span></td>
                                     </tr>
                                 {/each}
@@ -1243,13 +1287,17 @@
                         <label class="field inlineField">
                             <span class="label">VaR Confidence Levels</span>
                             <div class="inputGroup">
-                                <input class="input mono xsmallInput" type="text" bind:value={confidenceLevels} placeholder="0.95, 0.99" />
-                                <button class="btn primary xsmall" on:click={loadAnalytics} disabled={isFetchingAnalytics}>Update</button>
+                                <input class="input mono xsmallInput" type="text" bind:value={confidenceLevels}
+                                       placeholder="0.95, 0.99"/>
+                                <button class="btn primary xsmall" on:click={loadAnalytics}
+                                        disabled={isFetchingAnalytics}>Update
+                                </button>
                             </div>
                         </label>
                         <label class="field inlineField">
                             <span class="label">Period</span>
-                            <select class="input mono xsmallInput" bind:value={selectedPeriod} on:change={loadAnalytics} disabled={isFetchingAnalytics}>
+                            <select class="input mono xsmallInput" bind:value={selectedPeriod} on:change={loadAnalytics}
+                                    disabled={isFetchingAnalytics}>
                                 <option value="1M">1 Month</option>
                                 <option value="3M">3 Months</option>
                                 <option value="6M">6 Months</option>
@@ -1291,13 +1339,27 @@
                                     <tr>
                                         <td><span class="mono">{row.ticker}</span></td>
                                         <td><span class="mono">{formatNum(row.last, 2)}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['1D'])}">{formatPctPerf(row.perf['1D'])}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['1W'])}">{formatPctPerf(row.perf['1W'])}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['1M'])}">{formatPctPerf(row.perf['1M'])}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['YTD'])}">{formatPctPerf(row.perf['YTD'])}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['1Y'])}">{formatPctPerf(row.perf['1Y'])}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['3Y'])}">{formatPctPerf(row.perf['3Y'])}</span></td>
-                                        <td><span class="mono {pnlClass(row.perf['5Y'])}">{formatPctPerf(row.perf['5Y'])}</span></td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['1D'])}">{formatPctPerf(row.perf['1D'])}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['1W'])}">{formatPctPerf(row.perf['1W'])}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['1M'])}">{formatPctPerf(row.perf['1M'])}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['YTD'])}">{formatPctPerf(row.perf['YTD'])}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['1Y'])}">{formatPctPerf(row.perf['1Y'])}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['3Y'])}">{formatPctPerf(row.perf['3Y'])}</span>
+                                        </td>
+                                        <td><span
+                                                class="mono {pnlClass(row.perf['5Y'])}">{formatPctPerf(row.perf['5Y'])}</span>
+                                        </td>
                                         <td><span class="mono soft">{row.asof_used}</span></td>
                                     </tr>
                                 {:else}
@@ -1330,18 +1392,25 @@
                                                 {#each risk.points as pt, i}
                                                     <tr>
                                                         {#if i === 0}
-                                                            <td rowspan={risk.points.length}><span class="mono">{vol.ticker}</span></td>
-                                                            <td rowspan={risk.points.length}><span class="mono">{formatPct(vol.annualized_volatility)}</span></td>
+                                                            <td rowspan={risk.points.length}><span
+                                                                    class="mono">{vol.ticker}</span></td>
+                                                            <td rowspan={risk.points.length}><span
+                                                                    class="mono">{formatPct(vol.annualized_volatility)}</span>
+                                                            </td>
                                                         {/if}
-                                                        <td><span class="mono soft">{(pt.confidence_level * 100).toFixed(0)}%</span></td>
-                                                        <td><span class="mono">{formatPct(pt.var_historical)}</span></td>
+                                                        <td><span
+                                                                class="mono soft">{(pt.confidence_level * 100).toFixed(0)}
+                                                            %</span></td>
+                                                        <td><span class="mono">{formatPct(pt.var_historical)}</span>
+                                                        </td>
                                                         <td><span class="mono">{formatPct(pt.es_historical)}</span></td>
                                                     </tr>
                                                 {/each}
                                             {:else}
                                                 <tr>
                                                     <td><span class="mono">{vol.ticker}</span></td>
-                                                    <td><span class="mono">{formatPct(vol.annualized_volatility)}</span></td>
+                                                    <td><span class="mono">{formatPct(vol.annualized_volatility)}</span>
+                                                    </td>
                                                     <td colspan="3" class="soft">No risk data</td>
                                                 </tr>
                                             {/if}
@@ -1365,8 +1434,12 @@
                                         {#each ddRows as dd}
                                             <tr>
                                                 <td><span class="mono">{dd.ticker}</span></td>
-                                                <td><span class="mono redText">{formatPct(dd.metrics.max_drawdown)}</span></td>
-                                                <td><span class="mono {pnlClass(-dd.metrics.current_drawdown)}">{formatPct(dd.metrics.current_drawdown)}</span></td>
+                                                <td><span
+                                                        class="mono redText">{formatPct(dd.metrics.max_drawdown)}</span>
+                                                </td>
+                                                <td><span
+                                                        class="mono {pnlClass(-dd.metrics.current_drawdown)}">{formatPct(dd.metrics.current_drawdown)}</span>
+                                                </td>
                                             </tr>
                                         {/each}
                                         </tbody>
@@ -1390,16 +1463,22 @@
                                         {#if crData}
                                             <svg viewBox="0 0 {CHART_W} {CHART_H}" class="miniChart">
                                                 <defs>
-                                                    <linearGradient id="grad-cr-{series.ticker}" x1="0" y1="0" x2="0" y2="1">
-                                                        <stop offset="0%" stop-color="rgba(0, 212, 255, 0.2)" />
-                                                        <stop offset="100%" stop-color="rgba(0, 212, 255, 0)" />
+                                                    <linearGradient id="grad-cr-{series.ticker}" x1="0" y1="0" x2="0"
+                                                                    y2="1">
+                                                        <stop offset="0%" stop-color="rgba(0, 212, 255, 0.2)"/>
+                                                        <stop offset="100%" stop-color="rgba(0, 212, 255, 0)"/>
                                                     </linearGradient>
                                                 </defs>
-                                                <line x1={CHART_PAD.left} y1={crData.baselineY} x2={CHART_W - CHART_PAD.right} y2={crData.baselineY} stroke="rgba(255,255,255,0.1)" />
-                                                <path d={crData.area} fill="url(#grad-cr-{series.ticker})" />
-                                                <path d={crData.path} fill="none" stroke="rgba(0, 212, 255, 0.8)" stroke-width="1.5" />
-                                                <text x="5" y="15" fill="rgba(255,255,255,0.4)" font-size="9">{formatPct(crData.maxVal)}</text>
-                                                <text x="5" y={CHART_H - CHART_PAD.bottom} fill="rgba(255,255,255,0.4)" font-size="9">{formatPct(crData.minVal)}</text>
+                                                <line x1={CHART_PAD.left} y1={crData.baselineY}
+                                                      x2={CHART_W - CHART_PAD.right} y2={crData.baselineY}
+                                                      stroke="rgba(255,255,255,0.1)"/>
+                                                <path d={crData.area} fill="url(#grad-cr-{series.ticker})"/>
+                                                <path d={crData.path} fill="none" stroke="rgba(0, 212, 255, 0.8)"
+                                                      stroke-width="1.5"/>
+                                                <text x="5" y="15" fill="rgba(255,255,255,0.4)"
+                                                      font-size="9">{formatPct(crData.maxVal)}</text>
+                                                <text x="5" y={CHART_H - CHART_PAD.bottom} fill="rgba(255,255,255,0.4)"
+                                                      font-size="9">{formatPct(crData.minVal)}</text>
                                             </svg>
                                         {:else}
                                             <div class="emptyState xsmall">No return data</div>
@@ -1421,10 +1500,14 @@
                                     <div class="chartWrap">
                                         {#if ddData}
                                             <svg viewBox="0 0 {CHART_W} {CHART_H}" class="miniChart">
-                                                <line x1={CHART_PAD.left} y1={ddData.baselineY} x2={CHART_W - CHART_PAD.right} y2={ddData.baselineY} stroke="rgba(255,255,255,0.1)" />
-                                                <path d={ddData.area} fill="rgba(255, 69, 58, 0.1)" />
-                                                <path d={ddData.path} fill="none" stroke="rgba(255, 69, 58, 0.6)" stroke-width="1.2" />
-                                                <text x="5" y={CHART_H - CHART_PAD.bottom} fill="rgba(255,255,255,0.4)" font-size="9">{formatPct(ddData.minVal)}</text>
+                                                <line x1={CHART_PAD.left} y1={ddData.baselineY}
+                                                      x2={CHART_W - CHART_PAD.right} y2={ddData.baselineY}
+                                                      stroke="rgba(255,255,255,0.1)"/>
+                                                <path d={ddData.area} fill="rgba(255, 69, 58, 0.1)"/>
+                                                <path d={ddData.path} fill="none" stroke="rgba(255, 69, 58, 0.6)"
+                                                      stroke-width="1.2"/>
+                                                <text x="5" y={CHART_H - CHART_PAD.bottom} fill="rgba(255,255,255,0.4)"
+                                                      font-size="9">{formatPct(ddData.minVal)}</text>
                                                 <text x="5" y="15" fill="rgba(255,255,255,0.4)" font-size="9">0%</text>
                                             </svg>
                                         {:else}
@@ -1455,13 +1538,14 @@
                                             </tr>
                                             </thead>
                                             <tbody>
-                                            {#each [...dd.episodes].sort((a,b) => a.max_drawdown - b.max_drawdown).slice(0, 5) as ep}
+                                            {#each [...dd.episodes].sort((a, b) => a.max_drawdown - b.max_drawdown).slice(0, 5) as ep}
                                                 <tr>
                                                     <td><span class="mono">{ep.start_date}</span></td>
                                                     <td><span class="mono">{ep.trough_date}</span></td>
                                                     <td><span class="mono">{ep.end_date ?? "Ongoing"}</span></td>
                                                     <td><span class="mono">{ep.duration_days}d</span></td>
-                                                    <td><span class="mono redText">{formatPct(ep.max_drawdown)}</span></td>
+                                                    <td><span class="mono redText">{formatPct(ep.max_drawdown)}</span>
+                                                    </td>
                                                 </tr>
                                             {/each}
                                             </tbody>
@@ -1489,7 +1573,8 @@
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Risk-free rate</span>
-                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001" bind:value={healthRf} />
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001"
+                                       bind:value={healthRf}/>
                             </label>
                             <button class="btn primary xsmall" on:click={runPortfolioHealth}
                                     disabled={isFetchingHealth || !positionView || positionView.rows.length === 0}>
@@ -1551,13 +1636,17 @@
                             </div>
 
                             <div class="mcFootnote soft">
-                                {healthResult.observations} daily observations · {healthResult.start_date_used} → {healthResult.end_date_used} · Rf = {formatPct(healthResult.risk_free_rate)} annualized · fixed-weight rebalanced daily
+                                {healthResult.observations} daily observations · {healthResult.start_date_used}
+                                → {healthResult.end_date_used} · Rf = {formatPct(healthResult.risk_free_rate)}
+                                annualized · fixed-weight rebalanced daily
                                 {#if Object.keys(healthResult.errors).length > 0}
                                     · Skipped tickers: {Object.keys(healthResult.errors).join(", ")}
                                 {/if}
                             </div>
                         {:else if !isFetchingHealth}
-                            <div class="emptyState">Click "Compute health" to assess your portfolio's risk-adjusted performance over the last {healthLookback}.</div>
+                            <div class="emptyState">Click "Compute health" to assess your portfolio's risk-adjusted
+                                performance over the last {healthLookback}.
+                            </div>
                         {/if}
                     </div>
 
@@ -1577,7 +1666,8 @@
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Risk-free rate</span>
-                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001" bind:value={efRf} />
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001"
+                                       bind:value={efRf}/>
                             </label>
                             <button class="btn primary xsmall" on:click={runEfficientFrontier}
                                     disabled={isFetchingEF || !positionView || positionView.rows.length < 2}>
@@ -1593,84 +1683,119 @@
                             {@const ef = getEFChartData(efResult)}
                             {#if ef}
                                 <div class="efChartWrap">
-                                    <svg viewBox="0 0 {EF_W} {EF_H}" class="mcChart" preserveAspectRatio="xMidYMid meet">
+                                    <svg viewBox="0 0 {EF_W} {EF_H}" class="mcChart"
+                                         preserveAspectRatio="xMidYMid meet">
                                         <!-- Y gridlines + labels -->
                                         {#each ef.yTicks as tick}
-                                            <line x1={EF_PAD.left} y1={tick.y} x2={EF_W - EF_PAD.right} y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1" />
-                                            <text x={EF_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="end" class="mono">
+                                            <line x1={EF_PAD.left} y1={tick.y} x2={EF_W - EF_PAD.right} y2={tick.y}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={EF_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
                                                 {(tick.value * 100).toFixed(1)}%
                                             </text>
                                         {/each}
 
                                         <!-- X gridlines + labels -->
                                         {#each ef.xTicks as tick}
-                                            <line x1={tick.x} y1={EF_PAD.top} x2={tick.x} y2={EF_H - EF_PAD.bottom} stroke="rgba(255,255,255,0.04)" stroke-width="1" />
-                                            <text x={tick.x} y={EF_H - EF_PAD.bottom + 16} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle" class="mono">
+                                            <line x1={tick.x} y1={EF_PAD.top} x2={tick.x} y2={EF_H - EF_PAD.bottom}
+                                                  stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+                                            <text x={tick.x} y={EF_H - EF_PAD.bottom + 16} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="middle" class="mono">
                                                 {(tick.value * 100).toFixed(1)}%
                                             </text>
                                         {/each}
 
                                         <!-- Axis labels -->
-                                        <text x={EF_W / 2} y={EF_H - 6} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle">Annualized volatility</text>
-                                        <text x={14} y={EF_H / 2} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {EF_H / 2})">Annualized return</text>
+                                        <text x={EF_W / 2} y={EF_H - 6} fill="rgba(255,255,255,0.55)" font-size="11"
+                                              text-anchor="middle">Annualized volatility
+                                        </text>
+                                        <text x={14} y={EF_H / 2} fill="rgba(255,255,255,0.55)" font-size="11"
+                                              text-anchor="middle" transform="rotate(-90 14 {EF_H / 2})">Annualized
+                                            return
+                                        </text>
 
                                         <!-- Capital Market Line -->
                                         <line x1={ef.cml.x1} y1={ef.cml.y1} x2={ef.cml.x2} y2={ef.cml.y2}
-                                              stroke="rgba(255, 215, 0, 0.55)" stroke-width="1.2" stroke-dasharray="5 4" />
+                                              stroke="rgba(255, 215, 0, 0.55)" stroke-width="1.2"
+                                              stroke-dasharray="5 4"/>
 
                                         <!-- Efficient frontier curve -->
                                         {#if ef.frontierPath}
-                                            <path d={ef.frontierPath} fill="none" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2.2" />
+                                            <path d={ef.frontierPath} fill="none" stroke="rgba(0, 212, 255, 0.95)"
+                                                  stroke-width="2.2"/>
                                         {/if}
 
                                         <!-- Individual asset points -->
                                         {#each efResult.assets as a}
                                             <g>
                                                 <circle cx={ef.xAt(a.volatility)} cy={ef.yAt(a.expected_return)} r="4"
-                                                        fill="rgba(235, 235, 245, 0.6)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6">
-                                                    <title>{a.ticker}: vol {(a.volatility*100).toFixed(1)}%, ret {(a.expected_return*100).toFixed(1)}%</title>
+                                                        fill="rgba(235, 235, 245, 0.6)" stroke="rgba(0,0,0,0.4)"
+                                                        stroke-width="0.6">
+                                                    <title>{a.ticker}: vol {(a.volatility * 100).toFixed(1)}%, ret {(a.expected_return * 100).toFixed(1)}%</title>
                                                 </circle>
                                                 <text x={ef.xAt(a.volatility) + 7} y={ef.yAt(a.expected_return) + 3}
-                                                      fill="rgba(235, 235, 245, 0.65)" font-size="10" class="mono">{a.ticker}</text>
+                                                      fill="rgba(235, 235, 245, 0.65)" font-size="10"
+                                                      class="mono">{a.ticker}</text>
                                             </g>
                                         {/each}
 
                                         <!-- Min variance point -->
-                                        <circle cx={ef.xAt(efResult.min_variance.volatility)} cy={ef.yAt(efResult.min_variance.expected_return)} r="7"
+                                        <circle cx={ef.xAt(efResult.min_variance.volatility)}
+                                                cy={ef.yAt(efResult.min_variance.expected_return)} r="7"
                                                 fill="rgba(34, 197, 94, 0.95)" stroke="#fff" stroke-width="1.2">
-                                            <title>Min variance · vol {(efResult.min_variance.volatility*100).toFixed(2)}%, ret {(efResult.min_variance.expected_return*100).toFixed(2)}%, Sharpe {efResult.min_variance.sharpe.toFixed(2)}</title>
+                                            <title>Min variance · vol {(efResult.min_variance.volatility * 100).toFixed(2)}%, ret {(efResult.min_variance.expected_return * 100).toFixed(2)}%, Sharpe {efResult.min_variance.sharpe.toFixed(2)}</title>
                                         </circle>
 
                                         <!-- Max Sharpe (tangent) point -->
-                                        <circle cx={ef.xAt(efResult.max_sharpe.volatility)} cy={ef.yAt(efResult.max_sharpe.expected_return)} r="7"
+                                        <circle cx={ef.xAt(efResult.max_sharpe.volatility)}
+                                                cy={ef.yAt(efResult.max_sharpe.expected_return)} r="7"
                                                 fill="rgba(255, 215, 0, 0.95)" stroke="#fff" stroke-width="1.2">
-                                            <title>Tangent / Max Sharpe · vol {(efResult.max_sharpe.volatility*100).toFixed(2)}%, ret {(efResult.max_sharpe.expected_return*100).toFixed(2)}%, Sharpe {efResult.max_sharpe.sharpe.toFixed(2)}</title>
+                                            <title>Tangent / Max Sharpe · vol {(efResult.max_sharpe.volatility * 100).toFixed(2)}%, ret {(efResult.max_sharpe.expected_return * 100).toFixed(2)}%, Sharpe {efResult.max_sharpe.sharpe.toFixed(2)}</title>
                                         </circle>
 
                                         <!-- Current portfolio point -->
                                         {#if efResult.current_portfolio}
-                                            <circle cx={ef.xAt(efResult.current_portfolio.volatility)} cy={ef.yAt(efResult.current_portfolio.expected_return)} r="8"
+                                            <circle cx={ef.xAt(efResult.current_portfolio.volatility)}
+                                                    cy={ef.yAt(efResult.current_portfolio.expected_return)} r="8"
                                                     fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.5">
-                                                <title>Your portfolio · vol {(efResult.current_portfolio.volatility*100).toFixed(2)}%, ret {(efResult.current_portfolio.expected_return*100).toFixed(2)}%, Sharpe {efResult.current_portfolio.sharpe.toFixed(2)}</title>
+                                                <title>Your portfolio · vol {(efResult.current_portfolio.volatility * 100).toFixed(2)}%, ret {(efResult.current_portfolio.expected_return * 100).toFixed(2)}%, Sharpe {efResult.current_portfolio.sharpe.toFixed(2)}</title>
                                             </circle>
                                         {/if}
 
                                         <!-- Legend -->
                                         <g transform="translate({EF_W - EF_PAD.right - 200}, {EF_PAD.top + 6})">
-                                            <line x1="0" y1="6" x2="18" y2="6" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2.2" />
-                                            <text x="24" y="10" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Efficient frontier</text>
-                                            <line x1="0" y1="22" x2="18" y2="22" stroke="rgba(255, 215, 0, 0.55)" stroke-width="1.2" stroke-dasharray="5 4" />
-                                            <text x="24" y="26" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Capital Market Line</text>
-                                            <circle cx="9" cy="38" r="5" fill="rgba(255, 215, 0, 0.95)" stroke="#fff" stroke-width="1" />
-                                            <text x="24" y="42" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Tangent (max Sharpe)</text>
-                                            <circle cx="9" cy="54" r="5" fill="rgba(34, 197, 94, 0.95)" stroke="#fff" stroke-width="1" />
-                                            <text x="24" y="58" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Min variance</text>
+                                            <line x1="0" y1="6" x2="18" y2="6" stroke="rgba(0, 212, 255, 0.95)"
+                                                  stroke-width="2.2"/>
+                                            <text x="24" y="10" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Efficient frontier
+                                            </text>
+                                            <line x1="0" y1="22" x2="18" y2="22" stroke="rgba(255, 215, 0, 0.55)"
+                                                  stroke-width="1.2" stroke-dasharray="5 4"/>
+                                            <text x="24" y="26" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Capital Market Line
+                                            </text>
+                                            <circle cx="9" cy="38" r="5" fill="rgba(255, 215, 0, 0.95)" stroke="#fff"
+                                                    stroke-width="1"/>
+                                            <text x="24" y="42" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Tangent (max Sharpe)
+                                            </text>
+                                            <circle cx="9" cy="54" r="5" fill="rgba(34, 197, 94, 0.95)" stroke="#fff"
+                                                    stroke-width="1"/>
+                                            <text x="24" y="58" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Min variance
+                                            </text>
                                             {#if efResult.current_portfolio}
-                                                <circle cx="9" cy="70" r="6" fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.2" />
-                                                <text x="24" y="74" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Your portfolio</text>
+                                                <circle cx="9" cy="70" r="6" fill="rgba(255, 0, 60, 0.95)" stroke="#fff"
+                                                        stroke-width="1.2"/>
+                                                <text x="24" y="74" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                      class="mono">Your portfolio
+                                                </text>
                                             {/if}
-                                            <circle cx="9" cy="86" r="4" fill="rgba(235, 235, 245, 0.6)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6" />
-                                            <text x="24" y="90" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Individual asset</text>
+                                            <circle cx="9" cy="86" r="4" fill="rgba(235, 235, 245, 0.6)"
+                                                    stroke="rgba(0,0,0,0.4)" stroke-width="0.6"/>
+                                            <text x="24" y="90" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Individual asset
+                                            </text>
                                         </g>
                                     </svg>
                                 </div>
@@ -1679,12 +1804,14 @@
                                     <div class="mcStat">
                                         <div class="mcStatLabel">Max Sharpe (tangent)</div>
                                         <div class="mcStatValue mono greenText">{efResult.max_sharpe.sharpe.toFixed(2)}</div>
-                                        <div class="mono soft xsmall">vol {formatPct(efResult.max_sharpe.volatility)} · ret {formatPct(efResult.max_sharpe.expected_return)}</div>
+                                        <div class="mono soft xsmall">vol {formatPct(efResult.max_sharpe.volatility)} ·
+                                            ret {formatPct(efResult.max_sharpe.expected_return)}</div>
                                     </div>
                                     <div class="mcStat">
                                         <div class="mcStatLabel">Min variance</div>
                                         <div class="mcStatValue mono">{efResult.min_variance.sharpe.toFixed(2)}</div>
-                                        <div class="mono soft xsmall">vol {formatPct(efResult.min_variance.volatility)} · ret {formatPct(efResult.min_variance.expected_return)}</div>
+                                        <div class="mono soft xsmall">vol {formatPct(efResult.min_variance.volatility)}
+                                            · ret {formatPct(efResult.min_variance.expected_return)}</div>
                                     </div>
                                     {#if efResult.current_portfolio}
                                         {@const cur = efResult.current_portfolio}
@@ -1692,11 +1819,13 @@
                                         <div class="mcStat">
                                             <div class="mcStatLabel">Your portfolio</div>
                                             <div class="mcStatValue mono {sharpeClass(cur.sharpe)}">{cur.sharpe.toFixed(2)}</div>
-                                            <div class="mono soft xsmall">vol {formatPct(cur.volatility)} · ret {formatPct(cur.expected_return)}</div>
+                                            <div class="mono soft xsmall">vol {formatPct(cur.volatility)} ·
+                                                ret {formatPct(cur.expected_return)}</div>
                                         </div>
                                         <div class="mcStat">
                                             <div class="mcStatLabel">Sharpe gap vs tangent</div>
-                                            <div class="mcStatValue mono {gap > 0.3 ? 'redText' : ''}">−{gap.toFixed(2)}</div>
+                                            <div class="mcStatValue mono {gap > 0.3 ? 'redText' : ''}">
+                                                −{gap.toFixed(2)}</div>
                                             <div class="mono soft xsmall">{gap > 0.3 ? "Significant room to improve" : gap > 0.1 ? "Near-optimal" : "On the frontier"}</div>
                                         </div>
                                     {/if}
@@ -1727,7 +1856,9 @@
                                                         <td><span class="mono">{formatPct(sugg)}</span></td>
                                                         {#if efResult.current_portfolio}
                                                             <td><span class="mono soft">{formatPct(cur)}</span></td>
-                                                            <td><span class="mono {delta > 0 ? 'greenText' : delta < 0 ? 'redText' : ''}">{delta > 0 ? "+" : ""}{formatPct(delta)}</span></td>
+                                                            <td><span
+                                                                    class="mono {delta > 0 ? 'greenText' : delta < 0 ? 'redText' : ''}">{delta > 0 ? "+" : ""}{formatPct(delta)}</span>
+                                                            </td>
                                                         {/if}
                                                     </tr>
                                                 {/each}
@@ -1759,7 +1890,9 @@
                                                         <td><span class="mono">{formatPct(sugg)}</span></td>
                                                         {#if efResult.current_portfolio}
                                                             <td><span class="mono soft">{formatPct(cur)}</span></td>
-                                                            <td><span class="mono {delta > 0 ? 'greenText' : delta < 0 ? 'redText' : ''}">{delta > 0 ? "+" : ""}{formatPct(delta)}</span></td>
+                                                            <td><span
+                                                                    class="mono {delta > 0 ? 'greenText' : delta < 0 ? 'redText' : ''}">{delta > 0 ? "+" : ""}{formatPct(delta)}</span>
+                                                            </td>
                                                         {/if}
                                                     </tr>
                                                 {/each}
@@ -1771,13 +1904,17 @@
                             {/if}
 
                             <div class="mcFootnote soft">
-                                {efResult.observations} daily log-return observations · {efResult.start_date_used} → {efResult.end_date_used} · Rf = {formatPct(efResult.risk_free_rate)} · long-only, sum of weights = 1
+                                {efResult.observations} daily log-return observations · {efResult.start_date_used}
+                                → {efResult.end_date_used} · Rf = {formatPct(efResult.risk_free_rate)} · long-only, sum
+                                of weights = 1
                                 {#if Object.keys(efResult.errors).length > 0}
                                     · Skipped tickers: {Object.keys(efResult.errors).join(", ")}
                                 {/if}
                             </div>
                         {:else if !isFetchingEF}
-                            <div class="emptyState">Click "Compute frontier" to build the Markowitz efficient frontier over the last {efLookback}, mark your portfolio on it, and read suggested weights.</div>
+                            <div class="emptyState">Click "Compute frontier" to build the Markowitz efficient frontier
+                                over the last {efLookback}, mark your portfolio on it, and read suggested weights.
+                            </div>
                         {/if}
                     </div>
 
@@ -1821,7 +1958,8 @@
                                         <tbody>
                                         {#each corrResult.tickers as rowTicker, i}
                                             <tr>
-                                                <th class="corrTickerHead rowHead"><span class="mono">{rowTicker}</span></th>
+                                                <th class="corrTickerHead rowHead"><span class="mono">{rowTicker}</span>
+                                                </th>
                                                 {#each corrResult.tickers as colTicker, j}
                                                     <td class="corrCell"
                                                         style="background: {corrCellColor(corrResult.matrix[i][j])}; color: {corrTextColor(corrResult.matrix[i][j])};"
@@ -1834,9 +1972,12 @@
                                         </tbody>
                                     </table>
                                     <div class="corrLegend">
-                                        <span class="corrLegendItem"><span class="corrSwatch" style="background: {corrCellColor(-1)};"></span> −1.00</span>
-                                        <span class="corrLegendItem"><span class="corrSwatch" style="background: {corrCellColor(0)};"></span> 0.00</span>
-                                        <span class="corrLegendItem"><span class="corrSwatch" style="background: {corrCellColor(1)};"></span> +1.00</span>
+                                        <span class="corrLegendItem"><span class="corrSwatch"
+                                                                           style="background: {corrCellColor(-1)};"></span> −1.00</span>
+                                        <span class="corrLegendItem"><span class="corrSwatch"
+                                                                           style="background: {corrCellColor(0)};"></span> 0.00</span>
+                                        <span class="corrLegendItem"><span class="corrSwatch"
+                                                                           style="background: {corrCellColor(1)};"></span> +1.00</span>
                                     </div>
                                 </div>
 
@@ -1867,7 +2008,8 @@
                                         <div class="mcStat">
                                             <div class="mcStatLabel">Most correlated</div>
                                             <div class="mcStatValue mono redText">
-                                                {corrResult.stats.max_pair.ticker_a} ↔ {corrResult.stats.max_pair.ticker_b}
+                                                {corrResult.stats.max_pair.ticker_a}
+                                                ↔ {corrResult.stats.max_pair.ticker_b}
                                             </div>
                                             <div class="mono soft xsmall">{corrResult.stats.max_pair.correlation.toFixed(3)}</div>
                                         </div>
@@ -1876,7 +2018,8 @@
                                         <div class="mcStat">
                                             <div class="mcStatLabel">Least correlated</div>
                                             <div class="mcStatValue mono greenText">
-                                                {corrResult.stats.min_pair.ticker_a} ↔ {corrResult.stats.min_pair.ticker_b}
+                                                {corrResult.stats.min_pair.ticker_a}
+                                                ↔ {corrResult.stats.min_pair.ticker_b}
                                             </div>
                                             <div class="mono soft xsmall">{corrResult.stats.min_pair.correlation.toFixed(3)}</div>
                                         </div>
@@ -1885,13 +2028,16 @@
                             </div>
 
                             <div class="mcFootnote soft">
-                                {corrResult.observations} daily log-return observations · {corrResult.start_date_used} → {corrResult.end_date_used} · {corrResult.stats.n_pairs} unique pairs
+                                {corrResult.observations} daily log-return observations · {corrResult.start_date_used}
+                                → {corrResult.end_date_used} · {corrResult.stats.n_pairs} unique pairs
                                 {#if Object.keys(corrResult.errors).length > 0}
                                     · Skipped tickers: {Object.keys(corrResult.errors).join(", ")}
                                 {/if}
                             </div>
                         {:else if !isFetchingCorr}
-                            <div class="emptyState">Click "Compute correlations" to build the asset correlation heatmap over the last {corrLookback}.</div>
+                            <div class="emptyState">Click "Compute correlations" to build the asset correlation heatmap
+                                over the last {corrLookback}.
+                            </div>
                         {/if}
                     </div>
 
@@ -1901,15 +2047,18 @@
                         <div class="mcControls">
                             <label class="field inlineField">
                                 <span class="label">Portfolio size</span>
-                                <input class="input mono xsmallInput" type="number" min="2" max="20" step="1" bind:value={samplerPortfolioSize} />
+                                <input class="input mono xsmallInput" type="number" min="2" max="20" step="1"
+                                       bind:value={samplerPortfolioSize}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Simulations</span>
-                                <input class="input mono xsmallInput" type="number" min="10" max="5000" step="10" bind:value={samplerNSimulations} />
+                                <input class="input mono xsmallInput" type="number" min="10" max="5000" step="10"
+                                       bind:value={samplerNSimulations}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Top-K</span>
-                                <input class="input mono xsmallInput" type="number" min="1" max="50" step="1" bind:value={samplerTopK} />
+                                <input class="input mono xsmallInput" type="number" min="1" max="50" step="1"
+                                       bind:value={samplerTopK}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Lookback</span>
@@ -1923,11 +2072,13 @@
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Risk-free rate</span>
-                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001" bind:value={samplerRf} />
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001"
+                                       bind:value={samplerRf}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Diversification λ</span>
-                                <input class="input mono xsmallInput" type="number" min="0" max="5" step="0.05" bind:value={samplerDivWeight} />
+                                <input class="input mono xsmallInput" type="number" min="0" max="5" step="0.05"
+                                       bind:value={samplerDivWeight}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Weighting</span>
@@ -1938,7 +2089,7 @@
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Seed</span>
-                                <input class="input mono xsmallInput" type="number" step="1" bind:value={samplerSeed} />
+                                <input class="input mono xsmallInput" type="number" step="1" bind:value={samplerSeed}/>
                             </label>
                             <button class="btn primary xsmall" on:click={runSampler}
                                     disabled={isFetchingSampler || !assets || assets.length < samplerPortfolioSize}>
@@ -1956,26 +2107,39 @@
 
                         {#if samplerResult}
                             {@const samp = getSamplerChartData(samplerResult)}
-                            {@const topList = samplerRankBy === "composite" ? samplerResult.top_by_composite : samplerResult.top_by_sharpe}
+                            {@const
+                                topList = samplerRankBy === "composite" ? samplerResult.top_by_composite : samplerResult.top_by_sharpe}
                             {@const topSet = new Set(topList.map(p => p.tickers.join("|") + ":" + p.sharpe.toFixed(6)))}
                             {#if samp}
                                 <div class="efChartWrap">
-                                    <svg viewBox="0 0 {SAMP_W} {SAMP_H}" class="mcChart" preserveAspectRatio="xMidYMid meet">
+                                    <svg viewBox="0 0 {SAMP_W} {SAMP_H}" class="mcChart"
+                                         preserveAspectRatio="xMidYMid meet">
                                         {#each samp.yTicks as tick}
-                                            <line x1={SAMP_PAD.left} y1={tick.y} x2={SAMP_W - SAMP_PAD.right} y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1" />
-                                            <text x={SAMP_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="end" class="mono">
+                                            <line x1={SAMP_PAD.left} y1={tick.y} x2={SAMP_W - SAMP_PAD.right}
+                                                  y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={SAMP_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
                                                 {(tick.value * 100).toFixed(1)}%
                                             </text>
                                         {/each}
                                         {#each samp.xTicks as tick}
-                                            <line x1={tick.x} y1={SAMP_PAD.top} x2={tick.x} y2={SAMP_H - SAMP_PAD.bottom} stroke="rgba(255,255,255,0.04)" stroke-width="1" />
-                                            <text x={tick.x} y={SAMP_H - SAMP_PAD.bottom + 16} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle" class="mono">
+                                            <line x1={tick.x} y1={SAMP_PAD.top} x2={tick.x}
+                                                  y2={SAMP_H - SAMP_PAD.bottom} stroke="rgba(255,255,255,0.04)"
+                                                  stroke-width="1"/>
+                                            <text x={tick.x} y={SAMP_H - SAMP_PAD.bottom + 16}
+                                                  fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle"
+                                                  class="mono">
                                                 {(tick.value * 100).toFixed(1)}%
                                             </text>
                                         {/each}
 
-                                        <text x={SAMP_W / 2} y={SAMP_H - 6} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle">Annualized volatility</text>
-                                        <text x={14} y={SAMP_H / 2} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {SAMP_H / 2})">Annualized return</text>
+                                        <text x={SAMP_W / 2} y={SAMP_H - 6} fill="rgba(255,255,255,0.55)" font-size="11"
+                                              text-anchor="middle">Annualized volatility
+                                        </text>
+                                        <text x={14} y={SAMP_H / 2} fill="rgba(255,255,255,0.55)" font-size="11"
+                                              text-anchor="middle" transform="rotate(-90 14 {SAMP_H / 2})">Annualized
+                                            return
+                                        </text>
 
                                         <!-- Cloud (all simulated portfolios), colored by avg correlation -->
                                         {#each samplerResult.cloud as pt}
@@ -1986,7 +2150,7 @@
                                                     aria-label="Portfolio: Sharpe {pt.sharpe.toFixed(2)}, correlation {pt.avg_correlation.toFixed(2)}"
                                                     on:click={() => (selectedSamplerPoint = pt)}
                                                     on:keydown={(e) => selectSamplerPointOnKey(e, pt)}>
-                                                <title>vol {(pt.volatility*100).toFixed(2)}% · ret {(pt.expected_return*100).toFixed(2)}% · Sharpe {pt.sharpe.toFixed(2)} · avg ρ {pt.avg_correlation.toFixed(2)} — click for composition</title>
+                                                <title>vol {(pt.volatility * 100).toFixed(2)}% · ret {(pt.expected_return * 100).toFixed(2)}% · Sharpe {pt.sharpe.toFixed(2)} · avg ρ {pt.avg_correlation.toFixed(2)} — click for composition</title>
                                             </circle>
                                         {/each}
 
@@ -1997,28 +2161,32 @@
                                                     class="clickablePoint"
                                                     role="button" tabindex="0"
                                                     aria-label="Top portfolio #{i+1}: {p.tickers.join(', ')}"
-                                                    on:click={() => (selectedSamplerPoint = p as any)}
-                                                    on:keydown={(e) => selectSamplerPointOnKey(e, p as any)}>
-                                                <title>#{i+1} · {p.tickers.join(", ")} · Sharpe {p.sharpe.toFixed(2)} · avg ρ {p.avg_correlation.toFixed(2)} · score {p.composite_score.toFixed(2)} — click for composition</title>
+                                                    on:click={() => (selectedSamplerPoint = p)}
+                                                    on:keydown={(e) => selectSamplerPointOnKey(e, p)}>
+                                                <title>#{i + 1} · {p.tickers.join(", ")} · Sharpe {p.sharpe.toFixed(2)} · avg ρ {p.avg_correlation.toFixed(2)} · score {p.composite_score.toFixed(2)} — click for composition</title>
                                             </circle>
                                             <text x={samp.xAt(p.volatility)} y={samp.yAt(p.expected_return) - 11}
-                                                  fill="rgba(255, 215, 0, 0.95)" font-size="11" font-weight="700" text-anchor="middle" class="mono"
-                                                  style="pointer-events: none;">#{i+1}</text>
+                                                  fill="rgba(255, 215, 0, 0.95)" font-size="11" font-weight="700"
+                                                  text-anchor="middle" class="mono"
+                                                  style="pointer-events: none;">#{i + 1}</text>
                                         {/each}
 
                                         <!-- Selected point highlight ring (rendered on top) -->
                                         {#if selectedSamplerPoint}
-                                            <circle cx={samp.xAt(selectedSamplerPoint.volatility)} cy={samp.yAt(selectedSamplerPoint.expected_return)} r="11"
+                                            <circle cx={samp.xAt(selectedSamplerPoint.volatility)}
+                                                    cy={samp.yAt(selectedSamplerPoint.expected_return)} r="11"
                                                     fill="none" stroke="rgba(255, 255, 255, 0.95)" stroke-width="2"
-                                                    style="pointer-events: none;" />
-                                            <circle cx={samp.xAt(selectedSamplerPoint.volatility)} cy={samp.yAt(selectedSamplerPoint.expected_return)} r="14"
+                                                    style="pointer-events: none;"/>
+                                            <circle cx={samp.xAt(selectedSamplerPoint.volatility)}
+                                                    cy={samp.yAt(selectedSamplerPoint.expected_return)} r="14"
                                                     fill="none" stroke="rgba(255, 255, 255, 0.30)" stroke-width="1"
-                                                    style="pointer-events: none;" />
+                                                    style="pointer-events: none;"/>
                                         {/if}
 
                                         <!-- Current portfolio if available from EF result -->
                                         {#if efResult?.current_portfolio}
-                                            <circle cx={samp.xAt(efResult.current_portfolio.volatility)} cy={samp.yAt(efResult.current_portfolio.expected_return)} r="7"
+                                            <circle cx={samp.xAt(efResult.current_portfolio.volatility)}
+                                                    cy={samp.yAt(efResult.current_portfolio.expected_return)} r="7"
                                                     fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.4">
                                                 <title>Your portfolio · Sharpe {efResult.current_portfolio.sharpe.toFixed(2)}</title>
                                             </circle>
@@ -2026,17 +2194,29 @@
 
                                         <!-- Legend -->
                                         <g transform="translate({SAMP_W - SAMP_PAD.right - 220}, {SAMP_PAD.top + 6})">
-                                            <circle cx="6" cy="6" r="3" fill={corrPointColor(0, 0.6)} />
-                                            <text x="16" y="9" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Sim · low correlation</text>
-                                            <circle cx="6" cy="22" r="3" fill={corrPointColor(0.5, 0.6)} />
-                                            <text x="16" y="25" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Sim · medium</text>
-                                            <circle cx="6" cy="38" r="3" fill={corrPointColor(1, 0.6)} />
-                                            <text x="16" y="41" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Sim · high correlation</text>
-                                            <circle cx="6" cy="56" r="6" fill="rgba(255, 215, 0, 0.95)" stroke="#0a0a12" stroke-width="1" />
-                                            <text x="16" y="60" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Top-K</text>
+                                            <circle cx="6" cy="6" r="3" fill={corrPointColor(0, 0.6)}/>
+                                            <text x="16" y="9" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">
+                                                Sim · low correlation
+                                            </text>
+                                            <circle cx="6" cy="22" r="3" fill={corrPointColor(0.5, 0.6)}/>
+                                            <text x="16" y="25" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Sim · medium
+                                            </text>
+                                            <circle cx="6" cy="38" r="3" fill={corrPointColor(1, 0.6)}/>
+                                            <text x="16" y="41" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Sim · high correlation
+                                            </text>
+                                            <circle cx="6" cy="56" r="6" fill="rgba(255, 215, 0, 0.95)" stroke="#0a0a12"
+                                                    stroke-width="1"/>
+                                            <text x="16" y="60" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">Top-K
+                                            </text>
                                             {#if efResult?.current_portfolio}
-                                                <circle cx="6" cy="74" r="5" fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.2" />
-                                                <text x="16" y="78" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Your portfolio</text>
+                                                <circle cx="6" cy="74" r="5" fill="rgba(255, 0, 60, 0.95)" stroke="#fff"
+                                                        stroke-width="1.2"/>
+                                                <text x="16" y="78" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                      class="mono">Your portfolio
+                                                </text>
                                             {/if}
                                         </g>
                                     </svg>
@@ -2047,7 +2227,9 @@
                                 <div class="selectionPanel">
                                     <div class="selectionHead">
                                         <div class="panelLabel">Selected portfolio composition</div>
-                                        <button class="btn ghost xsmall" on:click={() => (selectedSamplerPoint = null)}>Clear</button>
+                                        <button class="btn ghost xsmall" on:click={() => (selectedSamplerPoint = null)}>
+                                            Clear
+                                        </button>
                                     </div>
                                     <div class="selectionPills">
                                         {#each selectedSamplerPoint.tickers as t, k}
@@ -2084,15 +2266,18 @@
 
                             <div class="samplerToolbar">
                                 <div class="rankSwitch">
-                                    <button class="switchBtn" class:active={samplerRankBy === "composite"} on:click={() => (samplerRankBy = "composite")}>
+                                    <button class="switchBtn" class:active={samplerRankBy === "composite"}
+                                            on:click={() => (samplerRankBy = "composite")}>
                                         Rank by composite
                                     </button>
-                                    <button class="switchBtn" class:active={samplerRankBy === "sharpe"} on:click={() => (samplerRankBy = "sharpe")}>
+                                    <button class="switchBtn" class:active={samplerRankBy === "sharpe"}
+                                            on:click={() => (samplerRankBy = "sharpe")}>
                                         Rank by Sharpe
                                     </button>
                                 </div>
                                 <div class="soft xsmall mono">
-                                    {samplerResult.n_simulations_evaluated} unique portfolios evaluated · {samplerResult.n_simulations_failed} skipped · click any point for composition
+                                    {samplerResult.n_simulations_evaluated} unique portfolios evaluated
+                                    · {samplerResult.n_simulations_failed} skipped · click any point for composition
                                 </div>
                             </div>
 
@@ -2112,7 +2297,7 @@
                                     <tbody>
                                     {#each topList as p, i}
                                         <tr>
-                                            <td><span class="mono bold">#{i+1}</span></td>
+                                            <td><span class="mono bold">#{i + 1}</span></td>
                                             <td>
                                                 {#each p.tickers as t, k}
                                                     <span class="samplerPill mono">
@@ -2121,10 +2306,15 @@
                                                     </span>
                                                 {/each}
                                             </td>
-                                            <td><span class="mono {pnlClass(p.expected_return)}">{formatPct(p.expected_return)}</span></td>
+                                            <td><span
+                                                    class="mono {pnlClass(p.expected_return)}">{formatPct(p.expected_return)}</span>
+                                            </td>
                                             <td><span class="mono">{formatPct(p.volatility)}</span></td>
-                                            <td><span class="mono {sharpeClass(p.sharpe)}">{p.sharpe.toFixed(2)}</span></td>
-                                            <td><span class="mono {p.avg_correlation > 0.7 ? 'redText' : p.avg_correlation < 0.3 ? 'greenText' : ''}">{p.avg_correlation.toFixed(2)}</span></td>
+                                            <td><span class="mono {sharpeClass(p.sharpe)}">{p.sharpe.toFixed(2)}</span>
+                                            </td>
+                                            <td><span
+                                                    class="mono {p.avg_correlation > 0.7 ? 'redText' : p.avg_correlation < 0.3 ? 'greenText' : ''}">{p.avg_correlation.toFixed(2)}</span>
+                                            </td>
                                             <td><span class="mono bold">{p.composite_score.toFixed(2)}</span></td>
                                         </tr>
                                     {/each}
@@ -2133,13 +2323,20 @@
                             </div>
 
                             <div class="mcFootnote soft">
-                                {samplerResult.optimization === "max_sharpe" ? "Max-Sharpe (long-only Markowitz) weights" : "Equal-weight 1/N"} · Rf = {formatPct(samplerResult.risk_free_rate)} · λ = {samplerResult.diversification_weight} · {samplerResult.start_date_used} → {samplerResult.end_date_used}
+                                {samplerResult.optimization === "max_sharpe" ? "Max-Sharpe (long-only Markowitz) weights" : "Equal-weight 1/N"}
+                                · Rf = {formatPct(samplerResult.risk_free_rate)} · λ
+                                = {samplerResult.diversification_weight} · {samplerResult.start_date_used}
+                                → {samplerResult.end_date_used}
                                 {#if Object.keys(samplerResult.errors).length > 0}
-                                    · Skipped tickers: {Object.keys(samplerResult.errors).slice(0, 8).join(", ")}{Object.keys(samplerResult.errors).length > 8 ? "…" : ""}
+                                    · Skipped
+                                    tickers: {Object.keys(samplerResult.errors).slice(0, 8).join(", ")}{Object.keys(samplerResult.errors).length > 8 ? "…" : ""}
                                 {/if}
                             </div>
                         {:else if !isFetchingSampler}
-                            <div class="emptyState">Click "Run sampler" to draw {samplerNSimulations} random {samplerPortfolioSize}-asset portfolios from your referential and rank them by composite score.</div>
+                            <div class="emptyState">Click "Run sampler" to draw {samplerNSimulations}
+                                random {samplerPortfolioSize}-asset portfolios from your referential and rank them by
+                                composite score.
+                            </div>
                         {/if}
                     </div>
 
@@ -2149,11 +2346,13 @@
                         <div class="mcControls">
                             <label class="field inlineField">
                                 <span class="label">Horizon (trading days)</span>
-                                <input class="input mono xsmallInput" type="number" min="10" max="2520" step="1" bind:value={mcHorizonDays} />
+                                <input class="input mono xsmallInput" type="number" min="10" max="2520" step="1"
+                                       bind:value={mcHorizonDays}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Simulations</span>
-                                <input class="input mono xsmallInput" type="number" min="50" max="20000" step="50" bind:value={mcNSimulations} />
+                                <input class="input mono xsmallInput" type="number" min="50" max="20000" step="50"
+                                       bind:value={mcNSimulations}/>
                             </label>
                             <label class="field inlineField">
                                 <span class="label">Lookback</span>
@@ -2165,7 +2364,8 @@
                                     <option value="10Y">10 Years</option>
                                 </select>
                             </label>
-                            <button class="btn primary xsmall" on:click={runMonteCarlo} disabled={isFetchingMC || !positionView || positionView.rows.length === 0}>
+                            <button class="btn primary xsmall" on:click={runMonteCarlo}
+                                    disabled={isFetchingMC || !positionView || positionView.rows.length === 0}>
                                 {isFetchingMC ? "Simulating…" : "Run simulation"}
                             </button>
                         </div>
@@ -2178,56 +2378,72 @@
                             {@const mcData = getMonteCarloChartData(mcResult)}
                             {#if mcData}
                                 <div class="mcChartWrap">
-                                    <svg viewBox="0 0 {MC_W} {MC_H}" class="mcChart" preserveAspectRatio="xMidYMid meet">
+                                    <svg viewBox="0 0 {MC_W} {MC_H}" class="mcChart"
+                                         preserveAspectRatio="xMidYMid meet">
                                         <defs>
                                             <linearGradient id="mc-band-outer" x1="0" y1="0" x2="0" y2="1">
-                                                <stop offset="0%" stop-color="rgba(0, 212, 255, 0.18)" />
-                                                <stop offset="100%" stop-color="rgba(0, 212, 255, 0.04)" />
+                                                <stop offset="0%" stop-color="rgba(0, 212, 255, 0.18)"/>
+                                                <stop offset="100%" stop-color="rgba(0, 212, 255, 0.04)"/>
                                             </linearGradient>
                                             <linearGradient id="mc-band-inner" x1="0" y1="0" x2="0" y2="1">
-                                                <stop offset="0%" stop-color="rgba(0, 212, 255, 0.35)" />
-                                                <stop offset="100%" stop-color="rgba(0, 212, 255, 0.12)" />
+                                                <stop offset="0%" stop-color="rgba(0, 212, 255, 0.35)"/>
+                                                <stop offset="100%" stop-color="rgba(0, 212, 255, 0.12)"/>
                                             </linearGradient>
                                         </defs>
 
                                         <!-- Y gridlines + labels -->
                                         {#each mcData.yTicks as tick}
-                                            <line x1={MC_PAD.left} y1={tick.y} x2={MC_W - MC_PAD.right} y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1" />
-                                            <text x={MC_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="end" class="mono">
+                                            <line x1={MC_PAD.left} y1={tick.y} x2={MC_W - MC_PAD.right} y2={tick.y}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={MC_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
                                                 {tick.value.toFixed(0)}
                                             </text>
                                         {/each}
 
                                         <!-- Baseline (initial value) -->
-                                        <line x1={MC_PAD.left} y1={mcData.baselineY} x2={MC_W - MC_PAD.right} y2={mcData.baselineY} stroke="rgba(255,255,255,0.35)" stroke-width="1" stroke-dasharray="3 3" />
+                                        <line x1={MC_PAD.left} y1={mcData.baselineY} x2={MC_W - MC_PAD.right}
+                                              y2={mcData.baselineY} stroke="rgba(255,255,255,0.35)" stroke-width="1"
+                                              stroke-dasharray="3 3"/>
 
                                         <!-- 5-95 percentile band -->
-                                        <path d={mcData.bandOuter} fill="url(#mc-band-outer)" />
+                                        <path d={mcData.bandOuter} fill="url(#mc-band-outer)"/>
                                         <!-- 25-75 percentile band -->
-                                        <path d={mcData.bandInner} fill="url(#mc-band-inner)" />
+                                        <path d={mcData.bandInner} fill="url(#mc-band-inner)"/>
 
                                         <!-- Spaghetti sample paths -->
                                         {#each mcData.samplePaths as p, i}
-                                            <path d={p} fill="none" stroke="rgba(0, 212, 255, 0.18)" stroke-width="0.7" />
+                                            <path d={p} fill="none" stroke="rgba(0, 212, 255, 0.18)"
+                                                  stroke-width="0.7"/>
                                         {/each}
 
                                         <!-- Median -->
-                                        <path d={mcData.median} fill="none" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2" />
+                                        <path d={mcData.median} fill="none" stroke="rgba(0, 212, 255, 0.95)"
+                                              stroke-width="2"/>
 
                                         <!-- X-axis ticks -->
                                         {#each mcData.xTicks as tick}
-                                            <line x1={tick.x} y1={MC_H - MC_PAD.bottom} x2={tick.x} y2={MC_H - MC_PAD.bottom + 4} stroke="rgba(255,255,255,0.35)" />
-                                            <text x={tick.x} y={MC_H - MC_PAD.bottom + 16} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle" class="mono">{tick.date}</text>
+                                            <line x1={tick.x} y1={MC_H - MC_PAD.bottom} x2={tick.x}
+                                                  y2={MC_H - MC_PAD.bottom + 4} stroke="rgba(255,255,255,0.35)"/>
+                                            <text x={tick.x} y={MC_H - MC_PAD.bottom + 16} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="middle" class="mono">{tick.date}</text>
                                         {/each}
 
                                         <!-- Legend -->
                                         <g transform="translate({MC_W - MC_PAD.right - 130}, {MC_PAD.top + 4})">
-                                            <rect x="0" y="0" width="14" height="8" fill="url(#mc-band-outer)" />
-                                            <text x="20" y="8" fill="rgba(255,255,255,0.65)" font-size="10" class="mono">5–95%</text>
-                                            <rect x="0" y="14" width="14" height="8" fill="url(#mc-band-inner)" />
-                                            <text x="20" y="22" fill="rgba(255,255,255,0.65)" font-size="10" class="mono">25–75%</text>
-                                            <line x1="0" y1="32" x2="14" y2="32" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2" />
-                                            <text x="20" y="36" fill="rgba(255,255,255,0.65)" font-size="10" class="mono">Median</text>
+                                            <rect x="0" y="0" width="14" height="8" fill="url(#mc-band-outer)"/>
+                                            <text x="20" y="8" fill="rgba(255,255,255,0.65)" font-size="10"
+                                                  class="mono">5–95%
+                                            </text>
+                                            <rect x="0" y="14" width="14" height="8" fill="url(#mc-band-inner)"/>
+                                            <text x="20" y="22" fill="rgba(255,255,255,0.65)" font-size="10"
+                                                  class="mono">25–75%
+                                            </text>
+                                            <line x1="0" y1="32" x2="14" y2="32" stroke="rgba(0, 212, 255, 0.95)"
+                                                  stroke-width="2"/>
+                                            <text x="20" y="36" fill="rgba(255,255,255,0.65)" font-size="10"
+                                                  class="mono">Median
+                                            </text>
                                         </g>
                                     </svg>
                                 </div>
@@ -2268,14 +2484,18 @@
                                 </div>
 
                                 <div class="mcFootnote soft">
-                                    {mcResult.stats.n_simulations} simulations · {mcResult.stats.horizon_days} trading days · params estimated on {mcResult.stats.lookback_start} → {mcResult.stats.lookback_end}
+                                    {mcResult.stats.n_simulations} simulations · {mcResult.stats.horizon_days} trading
+                                    days · params estimated on {mcResult.stats.lookback_start}
+                                    → {mcResult.stats.lookback_end}
                                     {#if Object.keys(mcResult.errors).length > 0}
                                         · Skipped tickers: {Object.keys(mcResult.errors).join(", ")}
                                     {/if}
                                 </div>
                             {/if}
                         {:else if !isFetchingMC}
-                            <div class="emptyState">Click "Run simulation" to project {mcHorizonDays} trading days forward using {mcNSimulations} GBM paths.</div>
+                            <div class="emptyState">Click "Run simulation" to project {mcHorizonDays} trading days
+                                forward using {mcNSimulations} GBM paths.
+                            </div>
                         {/if}
                     </div>
                 </div>
@@ -2311,7 +2531,8 @@
                                         <td><span class="mono">{tx.date}</span></td>
                                         <td><span class="mono">{tx.symbol}</span></td>
                                         <td>
-                                            <span class="sidePill" class:buy={tx.side === "BUY"} class:sell={tx.side === "SELL"}>
+                                            <span class="sidePill" class:buy={tx.side === "BUY"}
+                                                  class:sell={tx.side === "SELL"}>
                                                 {tx.side}
                                             </span>
                                         </td>
@@ -2350,9 +2571,8 @@
         display: flex;
         justify-content: center;
         align-items: center;
-        background:
-                radial-gradient(1200px 600px at 50% 20%, rgba(255, 0, 60, 0.12), transparent 60%),
-                linear-gradient(180deg, #07080c, #04040a);
+        background: radial-gradient(1200px 600px at 50% 20%, rgba(255, 0, 60, 0.12), transparent 60%),
+        linear-gradient(180deg, #07080c, #04040a);
         color: rgba(255, 255, 255, 0.9);
         box-sizing: border-box;
     }
@@ -2363,10 +2583,9 @@
         border-radius: 16px;
         background: linear-gradient(180deg, rgba(10, 10, 18, 0.92), rgba(6, 6, 12, 0.92));
         border: 1px solid rgba(255, 0, 60, 0.22);
-        box-shadow:
-                0 0 0 1px rgba(255, 0, 60, 0.08),
-                0 20px 60px rgba(0, 0, 0, 0.65),
-                0 0 30px rgba(255, 0, 60, 0.08);
+        box-shadow: 0 0 0 1px rgba(255, 0, 60, 0.08),
+        0 20px 60px rgba(0, 0, 0, 0.65),
+        0 0 30px rgba(255, 0, 60, 0.08);
         overflow: hidden;
         position: relative;
         display: flex;
@@ -2397,9 +2616,8 @@
     .header {
         padding: 14px 16px 12px;
         border-bottom: 1px solid rgba(255, 0, 60, 0.16);
-        background:
-                linear-gradient(90deg, rgba(255, 0, 60, 0.10), transparent 60%),
-                linear-gradient(180deg, rgba(255, 0, 60, 0.06), transparent 70%);
+        background: linear-gradient(90deg, rgba(255, 0, 60, 0.10), transparent 60%),
+        linear-gradient(180deg, rgba(255, 0, 60, 0.06), transparent 70%);
         flex-shrink: 0;
     }
 
