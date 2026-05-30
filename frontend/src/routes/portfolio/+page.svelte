@@ -205,6 +205,75 @@
     let isFetchingCorr = false;
     let corrError = "";
 
+    type PortfolioHealthStats = {
+        annualized_return: number;
+        annualized_volatility: number;
+        sharpe_ratio: number;
+        sortino_ratio: number;
+        calmar_ratio: number;
+        max_drawdown: number;
+        best_day: number;
+        worst_day: number;
+        pct_positive_days: number;
+        cumulative_return: number;
+    };
+
+    type PortfolioHealthResult = {
+        tickers: string[];
+        weights: number[];
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        risk_free_rate: number;
+        stats: PortfolioHealthStats;
+        errors: Record<string, string>;
+    };
+
+    let healthResult: PortfolioHealthResult | null = null;
+    let healthLookback = "3Y";
+    let healthRf = 0.02;
+    let isFetchingHealth = false;
+    let healthError = "";
+
+    type FrontierPoint = {
+        expected_return: number;
+        volatility: number;
+        sharpe: number;
+    };
+
+    type PortfolioOnFrontier = {
+        weights: Record<string, number>;
+        expected_return: number;
+        volatility: number;
+        sharpe: number;
+    };
+
+    type AssetPoint = {
+        ticker: string;
+        expected_return: number;
+        volatility: number;
+    };
+
+    type EfficientFrontierResult = {
+        tickers: string[];
+        risk_free_rate: number;
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        frontier: FrontierPoint[];
+        assets: AssetPoint[];
+        min_variance: PortfolioOnFrontier;
+        max_sharpe: PortfolioOnFrontier;
+        current_portfolio: PortfolioOnFrontier | null;
+        errors: Record<string, string>;
+    };
+
+    let efResult: EfficientFrontierResult | null = null;
+    let efLookback = "3Y";
+    let efRf = 0.02;
+    let isFetchingEF = false;
+    let efError = "";
+
     let form = {
         symbol: "",
         date: "",
@@ -359,6 +428,153 @@
         } finally {
             isFetchingMC = false;
         }
+    }
+
+    async function runEfficientFrontier() {
+        if (!positionView || positionView.rows.length < 2) {
+            efError = "Need at least 2 positions to compute the frontier.";
+            efResult = null;
+            return;
+        }
+        const eligible = positionView.rows.filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length < 2) {
+            efError = "Need at least 2 positions with a valid market weight.";
+            efResult = null;
+            return;
+        }
+        isFetchingEF = true;
+        efError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                weights: eligible.map(r => r.weight as number),
+                lookback_period: efLookback,
+                auto_adjust: true,
+                risk_free_rate: efRf,
+                n_points: 50
+            };
+            const res = await instance.post<EfficientFrontierResult>("/analytics/yahoo/efficient-frontier", payload);
+            efResult = res.data;
+        } catch (err: any) {
+            efError = err?.response?.data?.detail || err?.message || "Unable to compute efficient frontier.";
+            efResult = null;
+        } finally {
+            isFetchingEF = false;
+        }
+    }
+
+    // Efficient frontier chart geometry
+    const EF_W = 960;
+    const EF_H = 420;
+    const EF_PAD = { top: 24, right: 24, bottom: 44, left: 64 };
+
+    function getEFChartData(r: EfficientFrontierResult | null) {
+        if (!r) return null;
+        const allX: number[] = [];
+        const allY: number[] = [];
+        r.frontier.forEach(p => { allX.push(p.volatility); allY.push(p.expected_return); });
+        r.assets.forEach(a => { allX.push(a.volatility); allY.push(a.expected_return); });
+        allX.push(r.min_variance.volatility, r.max_sharpe.volatility);
+        allY.push(r.min_variance.expected_return, r.max_sharpe.expected_return);
+        if (r.current_portfolio) {
+            allX.push(r.current_portfolio.volatility);
+            allY.push(r.current_portfolio.expected_return);
+        }
+        // Include (0, Rf) for the CML origin
+        allX.push(0);
+        allY.push(r.risk_free_rate);
+
+        const xMin = 0;
+        const xMax = Math.max(...allX) * 1.05;
+        const yLo = Math.min(...allY);
+        const yHi = Math.max(...allY);
+        const yPad = (yHi - yLo) * 0.10 || 0.01;
+        const yMin = yLo - yPad;
+        const yMax = yHi + yPad;
+
+        const innerW = EF_W - EF_PAD.left - EF_PAD.right;
+        const innerH = EF_H - EF_PAD.top - EF_PAD.bottom;
+
+        const xAt = (v: number) => EF_PAD.left + ((v - xMin) / (xMax - xMin || 1)) * innerW;
+        const yAt = (v: number) => EF_PAD.top + (1 - (v - yMin) / (yMax - yMin || 1)) * innerH;
+
+        const frontierPath = r.frontier.length > 1
+            ? "M " + r.frontier.map(p => `${xAt(p.volatility)} ${yAt(p.expected_return)}`).join(" L ")
+            : "";
+
+        // CML: line from (0, Rf) with slope = max_sharpe; extend to chart's right edge
+        const slope = r.max_sharpe.sharpe;
+        const cmlX2 = xMax;
+        const cmlY2 = r.risk_free_rate + slope * cmlX2;
+        const cml = { x1: xAt(0), y1: yAt(r.risk_free_rate), x2: xAt(cmlX2), y2: yAt(cmlY2) };
+
+        // Y/X ticks (5)
+        const xTicks: { value: number; x: number }[] = [];
+        const yTicks: { value: number; y: number }[] = [];
+        for (let i = 0; i <= 5; i++) {
+            const vx = xMin + ((xMax - xMin) * i) / 5;
+            xTicks.push({ value: vx, x: xAt(vx) });
+            const vy = yMin + ((yMax - yMin) * i) / 5;
+            yTicks.push({ value: vy, y: yAt(vy) });
+        }
+
+        return {
+            xAt, yAt,
+            frontierPath,
+            cml,
+            xTicks, yTicks,
+            xMin, xMax, yMin, yMax,
+        };
+    }
+
+    async function runPortfolioHealth() {
+        if (!positionView || positionView.rows.length === 0) {
+            healthError = "No positions to analyze.";
+            healthResult = null;
+            return;
+        }
+        const eligible = positionView.rows.filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length === 0) {
+            healthError = "No positions with a valid market weight.";
+            healthResult = null;
+            return;
+        }
+        isFetchingHealth = true;
+        healthError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                weights: eligible.map(r => r.weight as number),
+                lookback_period: healthLookback,
+                auto_adjust: true,
+                risk_free_rate: healthRf
+            };
+            const res = await instance.post<PortfolioHealthResult>("/analytics/yahoo/portfolio-health", payload);
+            healthResult = res.data;
+        } catch (err: any) {
+            healthError = err?.response?.data?.detail || err?.message || "Unable to compute portfolio health.";
+            healthResult = null;
+        } finally {
+            isFetchingHealth = false;
+        }
+    }
+
+    function sharpeClass(v: number): string {
+        if (v >= 1) return "greenText";
+        if (v < 0) return "redText";
+        return "";
+    }
+
+    function sharpeVerdict(v: number): string {
+        if (v >= 2) return "Excellent";
+        if (v >= 1) return "Good";
+        if (v >= 0.5) return "Acceptable";
+        if (v >= 0) return "Poor";
+        return "Negative";
     }
 
     async function runCorrelation() {
@@ -1119,6 +1335,315 @@
                             {/if}
                         {/each}
                     {/if}
+
+                    <!-- PORTFOLIO HEALTH -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Portfolio Health · Sharpe & Risk-Adjusted Ratios</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={healthLookback}>
+                                    <option value="6M">6 Months</option>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Risk-free rate</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001" bind:value={healthRf} />
+                            </label>
+                            <button class="btn primary xsmall" on:click={runPortfolioHealth}
+                                    disabled={isFetchingHealth || !positionView || positionView.rows.length === 0}>
+                                {isFetchingHealth ? "Computing…" : "Compute health"}
+                            </button>
+                        </div>
+
+                        {#if healthError}
+                            <div class="errorBox">{healthError}</div>
+                        {/if}
+
+                        {#if healthResult}
+                            <div class="healthHeadline">
+                                <div class="healthBigKpi">
+                                    <div class="healthBigLabel">Sharpe ratio</div>
+                                    <div class="healthBigValue mono {sharpeClass(healthResult.stats.sharpe_ratio)}">
+                                        {healthResult.stats.sharpe_ratio.toFixed(2)}
+                                    </div>
+                                    <div class="healthVerdict mono soft">{sharpeVerdict(healthResult.stats.sharpe_ratio)}</div>
+                                </div>
+                                <div class="healthSubGrid">
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Sortino ratio</div>
+                                        <div class="mcStatValue mono {sharpeClass(healthResult.stats.sortino_ratio)}">{healthResult.stats.sortino_ratio.toFixed(2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Calmar ratio</div>
+                                        <div class="mcStatValue mono {sharpeClass(healthResult.stats.calmar_ratio)}">{healthResult.stats.calmar_ratio.toFixed(2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Ann. return</div>
+                                        <div class="mcStatValue mono {pnlClass(healthResult.stats.annualized_return)}">{formatPct(healthResult.stats.annualized_return)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Ann. volatility</div>
+                                        <div class="mcStatValue mono">{formatPct(healthResult.stats.annualized_volatility)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Max drawdown</div>
+                                        <div class="mcStatValue mono redText">{formatPct(healthResult.stats.max_drawdown)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Cumulative return</div>
+                                        <div class="mcStatValue mono {pnlClass(healthResult.stats.cumulative_return)}">{formatPct(healthResult.stats.cumulative_return)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Best day</div>
+                                        <div class="mcStatValue mono greenText">{formatPct(healthResult.stats.best_day)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Worst day</div>
+                                        <div class="mcStatValue mono redText">{formatPct(healthResult.stats.worst_day)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">% positive days</div>
+                                        <div class="mcStatValue mono">{formatPct(healthResult.stats.pct_positive_days)}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mcFootnote soft">
+                                {healthResult.observations} daily observations · {healthResult.start_date_used} → {healthResult.end_date_used} · Rf = {formatPct(healthResult.risk_free_rate)} annualized · fixed-weight rebalanced daily
+                                {#if Object.keys(healthResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(healthResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingHealth}
+                            <div class="emptyState">Click "Compute health" to assess your portfolio's risk-adjusted performance over the last {healthLookback}.</div>
+                        {/if}
+                    </div>
+
+                    <!-- EFFICIENT FRONTIER (Markowitz) -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Markowitz · Efficient Frontier</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={efLookback}>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Risk-free rate</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001" bind:value={efRf} />
+                            </label>
+                            <button class="btn primary xsmall" on:click={runEfficientFrontier}
+                                    disabled={isFetchingEF || !positionView || positionView.rows.length < 2}>
+                                {isFetchingEF ? "Optimizing…" : "Compute frontier"}
+                            </button>
+                        </div>
+
+                        {#if efError}
+                            <div class="errorBox">{efError}</div>
+                        {/if}
+
+                        {#if efResult}
+                            {@const ef = getEFChartData(efResult)}
+                            {#if ef}
+                                <div class="efChartWrap">
+                                    <svg viewBox="0 0 {EF_W} {EF_H}" class="mcChart" preserveAspectRatio="xMidYMid meet">
+                                        <!-- Y gridlines + labels -->
+                                        {#each ef.yTicks as tick}
+                                            <line x1={EF_PAD.left} y1={tick.y} x2={EF_W - EF_PAD.right} y2={tick.y} stroke="rgba(255,255,255,0.06)" stroke-width="1" />
+                                            <text x={EF_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="end" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+
+                                        <!-- X gridlines + labels -->
+                                        {#each ef.xTicks as tick}
+                                            <line x1={tick.x} y1={EF_PAD.top} x2={tick.x} y2={EF_H - EF_PAD.bottom} stroke="rgba(255,255,255,0.04)" stroke-width="1" />
+                                            <text x={tick.x} y={EF_H - EF_PAD.bottom + 16} fill="rgba(255,255,255,0.45)" font-size="10" text-anchor="middle" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+
+                                        <!-- Axis labels -->
+                                        <text x={EF_W / 2} y={EF_H - 6} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle">Annualized volatility</text>
+                                        <text x={14} y={EF_H / 2} fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {EF_H / 2})">Annualized return</text>
+
+                                        <!-- Capital Market Line -->
+                                        <line x1={ef.cml.x1} y1={ef.cml.y1} x2={ef.cml.x2} y2={ef.cml.y2}
+                                              stroke="rgba(255, 215, 0, 0.55)" stroke-width="1.2" stroke-dasharray="5 4" />
+
+                                        <!-- Efficient frontier curve -->
+                                        {#if ef.frontierPath}
+                                            <path d={ef.frontierPath} fill="none" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2.2" />
+                                        {/if}
+
+                                        <!-- Individual asset points -->
+                                        {#each efResult.assets as a}
+                                            <g>
+                                                <circle cx={ef.xAt(a.volatility)} cy={ef.yAt(a.expected_return)} r="4"
+                                                        fill="rgba(235, 235, 245, 0.6)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6">
+                                                    <title>{a.ticker}: vol {(a.volatility*100).toFixed(1)}%, ret {(a.expected_return*100).toFixed(1)}%</title>
+                                                </circle>
+                                                <text x={ef.xAt(a.volatility) + 7} y={ef.yAt(a.expected_return) + 3}
+                                                      fill="rgba(235, 235, 245, 0.65)" font-size="10" class="mono">{a.ticker}</text>
+                                            </g>
+                                        {/each}
+
+                                        <!-- Min variance point -->
+                                        <circle cx={ef.xAt(efResult.min_variance.volatility)} cy={ef.yAt(efResult.min_variance.expected_return)} r="7"
+                                                fill="rgba(34, 197, 94, 0.95)" stroke="#fff" stroke-width="1.2">
+                                            <title>Min variance · vol {(efResult.min_variance.volatility*100).toFixed(2)}%, ret {(efResult.min_variance.expected_return*100).toFixed(2)}%, Sharpe {efResult.min_variance.sharpe.toFixed(2)}</title>
+                                        </circle>
+
+                                        <!-- Max Sharpe (tangent) point -->
+                                        <circle cx={ef.xAt(efResult.max_sharpe.volatility)} cy={ef.yAt(efResult.max_sharpe.expected_return)} r="7"
+                                                fill="rgba(255, 215, 0, 0.95)" stroke="#fff" stroke-width="1.2">
+                                            <title>Tangent / Max Sharpe · vol {(efResult.max_sharpe.volatility*100).toFixed(2)}%, ret {(efResult.max_sharpe.expected_return*100).toFixed(2)}%, Sharpe {efResult.max_sharpe.sharpe.toFixed(2)}</title>
+                                        </circle>
+
+                                        <!-- Current portfolio point -->
+                                        {#if efResult.current_portfolio}
+                                            <circle cx={ef.xAt(efResult.current_portfolio.volatility)} cy={ef.yAt(efResult.current_portfolio.expected_return)} r="8"
+                                                    fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.5">
+                                                <title>Your portfolio · vol {(efResult.current_portfolio.volatility*100).toFixed(2)}%, ret {(efResult.current_portfolio.expected_return*100).toFixed(2)}%, Sharpe {efResult.current_portfolio.sharpe.toFixed(2)}</title>
+                                            </circle>
+                                        {/if}
+
+                                        <!-- Legend -->
+                                        <g transform="translate({EF_W - EF_PAD.right - 200}, {EF_PAD.top + 6})">
+                                            <line x1="0" y1="6" x2="18" y2="6" stroke="rgba(0, 212, 255, 0.95)" stroke-width="2.2" />
+                                            <text x="24" y="10" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Efficient frontier</text>
+                                            <line x1="0" y1="22" x2="18" y2="22" stroke="rgba(255, 215, 0, 0.55)" stroke-width="1.2" stroke-dasharray="5 4" />
+                                            <text x="24" y="26" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Capital Market Line</text>
+                                            <circle cx="9" cy="38" r="5" fill="rgba(255, 215, 0, 0.95)" stroke="#fff" stroke-width="1" />
+                                            <text x="24" y="42" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Tangent (max Sharpe)</text>
+                                            <circle cx="9" cy="54" r="5" fill="rgba(34, 197, 94, 0.95)" stroke="#fff" stroke-width="1" />
+                                            <text x="24" y="58" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Min variance</text>
+                                            {#if efResult.current_portfolio}
+                                                <circle cx="9" cy="70" r="6" fill="rgba(255, 0, 60, 0.95)" stroke="#fff" stroke-width="1.2" />
+                                                <text x="24" y="74" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Your portfolio</text>
+                                            {/if}
+                                            <circle cx="9" cy="86" r="4" fill="rgba(235, 235, 245, 0.6)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6" />
+                                            <text x="24" y="90" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">Individual asset</text>
+                                        </g>
+                                    </svg>
+                                </div>
+
+                                <div class="efSummary">
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Max Sharpe (tangent)</div>
+                                        <div class="mcStatValue mono greenText">{efResult.max_sharpe.sharpe.toFixed(2)}</div>
+                                        <div class="mono soft xsmall">vol {formatPct(efResult.max_sharpe.volatility)} · ret {formatPct(efResult.max_sharpe.expected_return)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Min variance</div>
+                                        <div class="mcStatValue mono">{efResult.min_variance.sharpe.toFixed(2)}</div>
+                                        <div class="mono soft xsmall">vol {formatPct(efResult.min_variance.volatility)} · ret {formatPct(efResult.min_variance.expected_return)}</div>
+                                    </div>
+                                    {#if efResult.current_portfolio}
+                                        {@const cur = efResult.current_portfolio}
+                                        {@const gap = efResult.max_sharpe.sharpe - cur.sharpe}
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Your portfolio</div>
+                                            <div class="mcStatValue mono {sharpeClass(cur.sharpe)}">{cur.sharpe.toFixed(2)}</div>
+                                            <div class="mono soft xsmall">vol {formatPct(cur.volatility)} · ret {formatPct(cur.expected_return)}</div>
+                                        </div>
+                                        <div class="mcStat">
+                                            <div class="mcStatLabel">Sharpe gap vs tangent</div>
+                                            <div class="mcStatValue mono {gap > 0.3 ? 'redText' : ''}">−{gap.toFixed(2)}</div>
+                                            <div class="mono soft xsmall">{gap > 0.3 ? "Significant room to improve" : gap > 0.1 ? "Near-optimal" : "On the frontier"}</div>
+                                        </div>
+                                    {/if}
+                                </div>
+
+                                <div class="efWeightsGrid">
+                                    <div>
+                                        <div class="efWeightsTitle">Tangent (max Sharpe) weights</div>
+                                        <div class="tableWrap">
+                                            <table class="kittTable xsmallTable">
+                                                <thead>
+                                                <tr>
+                                                    <th>Ticker</th>
+                                                    <th>Suggested</th>
+                                                    {#if efResult.current_portfolio}
+                                                        <th>Current</th>
+                                                        <th>Δ</th>
+                                                    {/if}
+                                                </tr>
+                                                </thead>
+                                                <tbody>
+                                                {#each efResult.tickers as t}
+                                                    {@const sugg = efResult.max_sharpe.weights[t] ?? 0}
+                                                    {@const cur = efResult.current_portfolio?.weights[t] ?? 0}
+                                                    {@const delta = sugg - cur}
+                                                    <tr>
+                                                        <td><span class="mono">{t}</span></td>
+                                                        <td><span class="mono">{formatPct(sugg)}</span></td>
+                                                        {#if efResult.current_portfolio}
+                                                            <td><span class="mono soft">{formatPct(cur)}</span></td>
+                                                            <td><span class="mono {delta > 0 ? 'greenText' : delta < 0 ? 'redText' : ''}">{delta > 0 ? "+" : ""}{formatPct(delta)}</span></td>
+                                                        {/if}
+                                                    </tr>
+                                                {/each}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div class="efWeightsTitle">Min variance weights</div>
+                                        <div class="tableWrap">
+                                            <table class="kittTable xsmallTable">
+                                                <thead>
+                                                <tr>
+                                                    <th>Ticker</th>
+                                                    <th>Suggested</th>
+                                                    {#if efResult.current_portfolio}
+                                                        <th>Current</th>
+                                                        <th>Δ</th>
+                                                    {/if}
+                                                </tr>
+                                                </thead>
+                                                <tbody>
+                                                {#each efResult.tickers as t}
+                                                    {@const sugg = efResult.min_variance.weights[t] ?? 0}
+                                                    {@const cur = efResult.current_portfolio?.weights[t] ?? 0}
+                                                    {@const delta = sugg - cur}
+                                                    <tr>
+                                                        <td><span class="mono">{t}</span></td>
+                                                        <td><span class="mono">{formatPct(sugg)}</span></td>
+                                                        {#if efResult.current_portfolio}
+                                                            <td><span class="mono soft">{formatPct(cur)}</span></td>
+                                                            <td><span class="mono {delta > 0 ? 'greenText' : delta < 0 ? 'redText' : ''}">{delta > 0 ? "+" : ""}{formatPct(delta)}</span></td>
+                                                        {/if}
+                                                    </tr>
+                                                {/each}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            {/if}
+
+                            <div class="mcFootnote soft">
+                                {efResult.observations} daily log-return observations · {efResult.start_date_used} → {efResult.end_date_used} · Rf = {formatPct(efResult.risk_free_rate)} · long-only, sum of weights = 1
+                                {#if Object.keys(efResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(efResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingEF}
+                            <div class="emptyState">Click "Compute frontier" to build the Markowitz efficient frontier over the last {efLookback}, mark your portfolio on it, and read suggested weights.</div>
+                        {/if}
+                    </div>
 
                     <!-- CORRELATION MATRIX -->
                     <div class="mcSection">
@@ -2060,6 +2585,96 @@
         display: flex;
         flex-direction: column;
         gap: 10px;
+    }
+
+    .healthHeadline {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: 16px;
+        margin-top: 8px;
+        align-items: stretch;
+    }
+
+    @media (max-width: 900px) {
+        .healthHeadline {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .healthBigKpi {
+        background: linear-gradient(180deg, rgba(255, 0, 60, 0.14), rgba(255, 0, 60, 0.04));
+        border: 1px solid rgba(255, 0, 60, 0.30);
+        border-radius: 12px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: flex-start;
+        box-shadow: inset 0 0 18px rgba(255, 0, 60, 0.12);
+    }
+
+    .healthBigLabel {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(235, 235, 245, 0.6);
+        margin-bottom: 8px;
+    }
+
+    .healthBigValue {
+        font-size: 38px;
+        font-weight: 700;
+        line-height: 1;
+        margin-bottom: 6px;
+    }
+
+    .healthVerdict {
+        font-size: 11px;
+        letter-spacing: 0.10em;
+        text-transform: uppercase;
+    }
+
+    .healthSubGrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 10px;
+    }
+
+    .efChartWrap {
+        background: rgba(0, 0, 0, 0.18);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 12px;
+        padding: 16px;
+        margin-top: 8px;
+    }
+
+    .efSummary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+    }
+
+    .efWeightsGrid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 16px;
+    }
+
+    @media (max-width: 900px) {
+        .efWeightsGrid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .efWeightsTitle {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(235, 235, 245, 0.6);
+        margin-bottom: 6px;
+        padding-left: 4px;
     }
 
     .bold {

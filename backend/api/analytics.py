@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any, Tuple
 from scipy.stats import norm
+from scipy.optimize import minimize
 
 import yfinance as yf
 from cachetools import TTLCache
@@ -47,6 +48,10 @@ RISK_CACHE = TTLCache(maxsize=2000, ttl=600)
 MC_CACHE = TTLCache(maxsize=500, ttl=600)
 
 CORR_CACHE = TTLCache(maxsize=500, ttl=600)
+
+HEALTH_CACHE = TTLCache(maxsize=500, ttl=600)
+
+EF_CACHE = TTLCache(maxsize=200, ttl=600)
 
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
@@ -315,6 +320,80 @@ class CorrelationResponse(BaseModel):
     end_date_used: str
     stats: CorrelationStats
     errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class PortfolioHealthStats(BaseModel):
+    annualized_return: float          # arithmetic, decimal (0.10 = 10%)
+    annualized_volatility: float      # decimal
+    sharpe_ratio: float
+    sortino_ratio: float
+    calmar_ratio: float
+    max_drawdown: float               # decimal, negative
+    best_day: float                   # decimal
+    worst_day: float                  # decimal
+    pct_positive_days: float          # decimal
+    cumulative_return: float          # decimal over the lookback
+
+
+class PortfolioHealthResponse(BaseModel):
+    tickers: List[str]
+    weights: List[float]
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    risk_free_rate: float
+    stats: PortfolioHealthStats
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class FrontierPoint(BaseModel):
+    expected_return: float
+    volatility: float
+    sharpe: float
+
+
+class PortfolioOnFrontier(BaseModel):
+    weights: Dict[str, float]
+    expected_return: float
+    volatility: float
+    sharpe: float
+
+
+class AssetPoint(BaseModel):
+    ticker: str
+    expected_return: float
+    volatility: float
+
+
+class EfficientFrontierResponse(BaseModel):
+    tickers: List[str]
+    risk_free_rate: float
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    frontier: List[FrontierPoint]
+    assets: List[AssetPoint]
+    min_variance: PortfolioOnFrontier
+    max_sharpe: PortfolioOnFrontier
+    current_portfolio: Optional[PortfolioOnFrontier] = None
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class EfficientFrontierRequest(BaseModel):
+    tickers: List[str] = Field(min_length=2, max_length=50)
+    weights: Optional[List[float]] = None
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
+    n_points: int = Field(default=40, ge=10, le=120)
+
+
+class PortfolioHealthRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=100)
+    weights: List[float] = Field(min_length=1, max_length=100)
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
 
 
 class CorrelationRequest(BaseModel):
@@ -1987,6 +2066,389 @@ def yahoo_correlation_post(req: CorrelationRequest):
             lookback_period=req.lookback_period,
             auto_adjust=req.auto_adjust,
             return_mode=req.return_mode,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# Portfolio health (Sharpe / Sortino / Calmar / …)
+# =========================
+
+def _run_portfolio_health(
+    tickers: List[str],
+    weights: List[float],
+    lookback_period: str,
+    auto_adjust: bool,
+    risk_free_rate: float,
+) -> Dict[str, Any]:
+    if len(tickers) != len(weights):
+        raise ValueError("tickers and weights must have the same length")
+
+    w_arr = np.array(weights, dtype=float)
+    if np.any(w_arr < 0):
+        raise ValueError("weights must be non-negative")
+    w_sum = w_arr.sum()
+    if w_sum <= 0:
+        raise ValueError("sum of weights must be > 0")
+    w_arr = w_arr / w_sum
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    cache_key = (
+        "health",
+        tuple(tickers),
+        tuple(round(float(x), 6) for x in w_arr.tolist()),
+        lookback_period,
+        auto_adjust,
+        round(float(risk_free_rate), 6),
+        end_ts.date().isoformat(),
+    )
+    if cache_key in HEALTH_CACHE:
+        return HEALTH_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    available = [t for t in tickers if t in close.columns]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    if not available:
+        raise ValueError("No tickers available in downloaded data")
+
+    keep_mask = np.array([t in close.columns for t in tickers])
+    w_kept = w_arr[keep_mask]
+    s_kept = w_kept.sum()
+    if s_kept <= 0:
+        raise ValueError("All weights map to missing tickers")
+    w_kept = w_kept / s_kept
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 20:
+        raise ValueError("Not enough overlapping price observations (need >= 20)")
+
+    # Arithmetic daily returns per asset
+    asset_rets = prices.pct_change().dropna()
+    if len(asset_rets) < 10:
+        raise ValueError("Not enough return observations to compute ratios")
+
+    # Portfolio daily returns = weighted sum (fixed-weight rebalanced daily)
+    port_rets = asset_rets.to_numpy() @ w_kept  # 1D array
+
+    # Annualization
+    ann_factor = 252.0
+    daily_mean = float(np.mean(port_rets))
+    daily_std = float(np.std(port_rets, ddof=1)) if len(port_rets) > 1 else 0.0
+    ann_return = daily_mean * ann_factor
+    ann_vol = daily_std * float(np.sqrt(ann_factor))
+
+    # Sharpe
+    if ann_vol > 0:
+        sharpe = (ann_return - float(risk_free_rate)) / ann_vol
+    else:
+        sharpe = 0.0
+
+    # Sortino: downside deviation w.r.t. Rf daily
+    rf_daily = float(risk_free_rate) / ann_factor
+    downside = port_rets[port_rets < rf_daily] - rf_daily
+    if downside.size > 1:
+        downside_dev = float(np.sqrt(np.mean(np.square(downside))) * np.sqrt(ann_factor))
+    else:
+        downside_dev = 0.0
+    sortino = ((ann_return - float(risk_free_rate)) / downside_dev) if downside_dev > 0 else 0.0
+
+    # Cumulative return + max drawdown on portfolio NAV
+    nav = np.cumprod(1.0 + port_rets)
+    cum_return = float(nav[-1] - 1.0)
+    running_max = np.maximum.accumulate(nav)
+    drawdowns = nav / running_max - 1.0
+    max_dd = float(np.min(drawdowns)) if drawdowns.size else 0.0
+
+    # Calmar = annualized return / |max DD|
+    calmar = (ann_return / abs(max_dd)) if max_dd < 0 else 0.0
+
+    best_day = float(np.max(port_rets)) if port_rets.size else 0.0
+    worst_day = float(np.min(port_rets)) if port_rets.size else 0.0
+    pct_positive = float(np.mean(port_rets > 0)) if port_rets.size else 0.0
+
+    out = {
+        "tickers": available,
+        "weights": w_kept.tolist(),
+        "observations": int(len(port_rets)),
+        "start_date_used": asset_rets.index[0].date().isoformat(),
+        "end_date_used": asset_rets.index[-1].date().isoformat(),
+        "risk_free_rate": float(risk_free_rate),
+        "stats": {
+            "annualized_return": ann_return,
+            "annualized_volatility": ann_vol,
+            "sharpe_ratio": sharpe,
+            "sortino_ratio": sortino,
+            "calmar_ratio": calmar,
+            "max_drawdown": max_dd,
+            "best_day": best_day,
+            "worst_day": worst_day,
+            "pct_positive_days": pct_positive,
+            "cumulative_return": cum_return,
+        },
+        "errors": errors,
+    }
+    HEALTH_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/portfolio-health", response_model=PortfolioHealthResponse)
+def yahoo_portfolio_health_post(req: PortfolioHealthRequest):
+    try:
+        return _run_portfolio_health(
+            tickers=req.tickers,
+            weights=req.weights,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            risk_free_rate=req.risk_free_rate,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# Markowitz efficient frontier
+# =========================
+
+def _portfolio_perf(weights: np.ndarray, mu: np.ndarray, cov: np.ndarray) -> Tuple[float, float]:
+    """Return (expected_return, volatility), both annualized."""
+    ret = float(np.dot(weights, mu))
+    var = float(weights @ cov @ weights)
+    vol = float(np.sqrt(max(var, 0.0)))
+    return ret, vol
+
+
+def _min_variance_for_target(
+    target_return: float,
+    mu: np.ndarray,
+    cov: np.ndarray,
+) -> Optional[np.ndarray]:
+    n = len(mu)
+    w0 = np.full(n, 1.0 / n)
+    bounds = [(0.0, 1.0)] * n
+    constraints = [
+        {"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)},
+        {"type": "eq", "fun": lambda w, t=target_return: float(np.dot(w, mu) - t)},
+    ]
+    res = minimize(
+        lambda w: float(w @ cov @ w),
+        w0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"maxiter": 200, "ftol": 1e-10, "disp": False},
+    )
+    return res.x if res.success else None
+
+
+def _min_variance_portfolio(mu: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    n = len(mu)
+    w0 = np.full(n, 1.0 / n)
+    bounds = [(0.0, 1.0)] * n
+    constraints = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
+    res = minimize(
+        lambda w: float(w @ cov @ w),
+        w0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"maxiter": 200, "ftol": 1e-10, "disp": False},
+    )
+    if not res.success:
+        raise ValueError(f"Min variance optimization failed: {res.message}")
+    return res.x
+
+
+def _max_sharpe_portfolio(mu: np.ndarray, cov: np.ndarray, rf: float) -> np.ndarray:
+    n = len(mu)
+    w0 = np.full(n, 1.0 / n)
+    bounds = [(0.0, 1.0)] * n
+    constraints = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
+
+    def neg_sharpe(w):
+        ret = float(np.dot(w, mu))
+        var = float(w @ cov @ w)
+        vol = float(np.sqrt(max(var, 1e-18)))
+        return -(ret - rf) / vol if vol > 0 else 0.0
+
+    res = minimize(
+        neg_sharpe,
+        w0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"maxiter": 300, "ftol": 1e-10, "disp": False},
+    )
+    if not res.success:
+        raise ValueError(f"Max Sharpe optimization failed: {res.message}")
+    return res.x
+
+
+def _build_portfolio_descriptor(
+    w: np.ndarray,
+    tickers: List[str],
+    mu: np.ndarray,
+    cov: np.ndarray,
+    rf: float,
+) -> Dict[str, Any]:
+    ret, vol = _portfolio_perf(w, mu, cov)
+    sharpe = ((ret - rf) / vol) if vol > 0 else 0.0
+    return {
+        "weights": {tickers[i]: float(w[i]) for i in range(len(tickers))},
+        "expected_return": ret,
+        "volatility": vol,
+        "sharpe": sharpe,
+    }
+
+
+def _run_efficient_frontier(
+    tickers: List[str],
+    weights: Optional[List[float]],
+    lookback_period: str,
+    auto_adjust: bool,
+    risk_free_rate: float,
+    n_points: int,
+) -> Dict[str, Any]:
+    if len(tickers) < 2:
+        raise ValueError("At least 2 tickers are required to compute an efficient frontier")
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    current_w_arr: Optional[np.ndarray] = None
+    if weights is not None:
+        if len(weights) != len(tickers):
+            raise ValueError("weights length must match tickers length")
+        w = np.array(weights, dtype=float)
+        if np.any(w < 0):
+            raise ValueError("weights must be non-negative")
+        s = w.sum()
+        if s > 0:
+            current_w_arr = w / s
+
+    cache_key = (
+        "ef",
+        tuple(tickers),
+        None if current_w_arr is None else tuple(round(float(x), 6) for x in current_w_arr.tolist()),
+        lookback_period,
+        auto_adjust,
+        round(float(risk_free_rate), 6),
+        int(n_points),
+        end_ts.date().isoformat(),
+    )
+    if cache_key in EF_CACHE:
+        return EF_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    available = [t for t in tickers if t in close.columns]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    if len(available) < 2:
+        raise ValueError("Need at least 2 tickers with price data for the frontier")
+
+    # Re-align current weights to available tickers (renormalize) if provided
+    current_w_aligned: Optional[np.ndarray] = None
+    if current_w_arr is not None:
+        keep_mask = np.array([t in close.columns for t in tickers])
+        w_kept = current_w_arr[keep_mask]
+        sk = w_kept.sum()
+        current_w_aligned = (w_kept / sk) if sk > 0 else None
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 30:
+        raise ValueError("Not enough overlapping price observations (need >= 30)")
+
+    log_rets = np.log(prices / prices.shift(1)).dropna()
+    if len(log_rets) < 20:
+        raise ValueError("Not enough return observations to compute frontier")
+
+    ann_factor = 252.0
+    mu = log_rets.mean().to_numpy() * ann_factor                # annualized
+    cov = log_rets.cov().to_numpy() * ann_factor                # annualized
+
+    rf = float(risk_free_rate)
+
+    # Special portfolios
+    w_minvar = _min_variance_portfolio(mu, cov)
+    w_tangent = _max_sharpe_portfolio(mu, cov, rf)
+
+    minvar_desc = _build_portfolio_descriptor(w_minvar, available, mu, cov, rf)
+    tangent_desc = _build_portfolio_descriptor(w_tangent, available, mu, cov, rf)
+
+    # Frontier: span from min-var return up to max individual asset return
+    r_min = minvar_desc["expected_return"]
+    r_max = float(np.max(mu))
+    if r_max <= r_min:
+        # Edge case: nothing to span — just emit the single point
+        targets = np.array([r_min])
+    else:
+        targets = np.linspace(r_min, r_max, int(n_points))
+
+    frontier_points: List[Dict[str, float]] = []
+    for t in targets:
+        w_opt = _min_variance_for_target(float(t), mu, cov)
+        if w_opt is None:
+            continue
+        ret, vol = _portfolio_perf(w_opt, mu, cov)
+        sharpe = ((ret - rf) / vol) if vol > 0 else 0.0
+        frontier_points.append({
+            "expected_return": ret,
+            "volatility": vol,
+            "sharpe": sharpe,
+        })
+
+    # Individual assets
+    asset_points: List[Dict[str, Any]] = []
+    for i, t in enumerate(available):
+        sigma_i = float(np.sqrt(max(cov[i, i], 0.0)))
+        asset_points.append({
+            "ticker": t,
+            "expected_return": float(mu[i]),
+            "volatility": sigma_i,
+        })
+
+    current_desc: Optional[Dict[str, Any]] = None
+    if current_w_aligned is not None and current_w_aligned.size == len(available):
+        current_desc = _build_portfolio_descriptor(current_w_aligned, available, mu, cov, rf)
+
+    out = {
+        "tickers": available,
+        "risk_free_rate": rf,
+        "observations": int(len(log_rets)),
+        "start_date_used": log_rets.index[0].date().isoformat(),
+        "end_date_used": log_rets.index[-1].date().isoformat(),
+        "frontier": frontier_points,
+        "assets": asset_points,
+        "min_variance": minvar_desc,
+        "max_sharpe": tangent_desc,
+        "current_portfolio": current_desc,
+        "errors": errors,
+    }
+    EF_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/efficient-frontier", response_model=EfficientFrontierResponse)
+def yahoo_efficient_frontier_post(req: EfficientFrontierRequest):
+    try:
+        return _run_efficient_frontier(
+            tickers=req.tickers,
+            weights=req.weights,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            risk_free_rate=req.risk_free_rate,
+            n_points=req.n_points,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
