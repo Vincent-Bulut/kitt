@@ -341,7 +341,9 @@
     let samplerTopK = 5;
     let samplerLookback = "3Y";
     let samplerRf = 0.02;
-    let samplerDivWeight = 0.5;
+    let samplerDivWeight = 1.0;
+    let samplerMaxWeight = 1.0;
+    let samplerMinWeight = 0.0;
     let samplerOpt: "max_sharpe" | "equal_weight" = "max_sharpe";
     let samplerSeed = 42;
     let samplerRankBy: "composite" | "sharpe" = "composite";
@@ -524,6 +526,8 @@
                 auto_adjust: true,
                 risk_free_rate: samplerRf,
                 diversification_weight: samplerDivWeight,
+                max_weight: samplerMaxWeight,
+                min_weight: samplerMinWeight,
                 optimization: samplerOpt,
                 seed: samplerSeed
             };
@@ -2081,6 +2085,16 @@
                                        bind:value={samplerDivWeight}/>
                             </label>
                             <label class="field inlineField">
+                                <span class="label">Max weight</span>
+                                <input class="input mono xsmallInput" type="number" min="0.05" max="1" step="0.05"
+                                       bind:value={samplerMaxWeight}/>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Min weight</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.01"
+                                       bind:value={samplerMinWeight}/>
+                            </label>
+                            <label class="field inlineField">
                                 <span class="label">Weighting</span>
                                 <select class="input mono xsmallInput" bind:value={samplerOpt}>
                                     <option value="max_sharpe">Max Sharpe (Markowitz)</option>
@@ -2098,7 +2112,7 @@
                         </div>
 
                         <div class="soft xsmall mono" style="margin-bottom: 6px;">
-                            Universe: {assets.length} asset(s) from referential · score = sharpe − λ × avg_correlation
+                            Universe: {assets.length} asset(s) from referential · score = sharpe − λ × avg_correlation · weight per asset ∈ [{(samplerMinWeight * 100).toFixed(0)}%, {(samplerMaxWeight * 100).toFixed(0)}%]
                         </div>
 
                         {#if samplerError}

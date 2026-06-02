@@ -430,7 +430,9 @@ class PortfolioSamplerRequest(BaseModel):
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
-    diversification_weight: float = Field(default=0.5, ge=0.0, le=5.0)
+    diversification_weight: float = Field(default=1.0, ge=0.0, le=5.0)
+    max_weight: float = Field(default=1.0, ge=0.05, le=1.0)
+    min_weight: float = Field(default=0.0, ge=0.0, le=0.5)
     optimization: SamplerOptimization = "max_sharpe"
     seed: int = 42
 
@@ -2528,14 +2530,18 @@ def _optimize_subset(
     cov_sub: np.ndarray,
     rf: float,
     mode: str,
+    max_weight: float = 1.0,
+    min_weight: float = 0.0,
 ) -> Optional[np.ndarray]:
     n = len(mu_sub)
     if mode == "equal_weight":
         return np.full(n, 1.0 / n)
 
-    # max_sharpe
+    # max_sharpe — clamp lo so n*lo <= 1 (feasibility guarantee)
+    lo = min(float(min_weight), 1.0 / n)
+    cap = max(min(float(max_weight), 1.0), lo)
     w0 = np.full(n, 1.0 / n)
-    bounds = [(0.0, 1.0)] * n
+    bounds = [(lo, cap)] * n
     constraints = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
 
     def neg_sharpe(w):
@@ -2561,6 +2567,8 @@ def _run_portfolio_sampler(
     auto_adjust: bool,
     risk_free_rate: float,
     diversification_weight: float,
+    max_weight: float,
+    min_weight: float,
     optimization: str,
     seed: int,
 ) -> Dict[str, Any]:
@@ -2591,6 +2599,8 @@ def _run_portfolio_sampler(
         auto_adjust,
         round(float(risk_free_rate), 6),
         round(float(diversification_weight), 6),
+        round(float(max_weight), 6),
+        round(float(min_weight), 6),
         optimization,
         int(seed),
         end_ts.date().isoformat(),
@@ -2658,7 +2668,7 @@ def _run_portfolio_sampler(
         mu_sub = sub_rets.mean().to_numpy() * ann_factor
         cov_sub = sub_rets.cov().to_numpy() * ann_factor
 
-        w = _optimize_subset(mu_sub, cov_sub, float(risk_free_rate), optimization)
+        w = _optimize_subset(mu_sub, cov_sub, float(risk_free_rate), optimization, float(max_weight), float(min_weight))
         if w is None:
             n_failed += 1
             continue
@@ -2731,6 +2741,8 @@ def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest):
             auto_adjust=req.auto_adjust,
             risk_free_rate=req.risk_free_rate,
             diversification_weight=req.diversification_weight,
+            max_weight=req.max_weight,
+            min_weight=req.min_weight,
             optimization=req.optimization,
             seed=req.seed,
         )
