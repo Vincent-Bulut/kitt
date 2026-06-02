@@ -12,3 +12,4 @@ frontend/.env
 
 # Jupyter notebooks
 *.ipynb
+docs
