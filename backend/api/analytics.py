@@ -55,6 +55,8 @@ EF_CACHE = TTLCache(maxsize=200, ttl=600)
 
 SAMPLER_CACHE = TTLCache(maxsize=100, ttl=600)
 
+BL_CACHE = TTLCache(maxsize=200, ttl=600)
+
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
     "1Y": 365, "2Y": 730, "3Y": 1095,
@@ -444,6 +446,62 @@ class EfficientFrontierRequest(BaseModel):
     auto_adjust: bool = True
     risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
     n_points: int = Field(default=40, ge=10, le=120)
+
+
+# --- Black-Litterman ---
+
+BLViewType = Literal["absolute", "relative"]
+
+
+class BLView(BaseModel):
+    # "absolute": asset expected to return `value` (annualized total return).
+    # "relative": `asset` expected to outperform `asset_other` by `value` (annualized).
+    view_type: BLViewType = "absolute"
+    asset: str
+    asset_other: Optional[str] = None
+    value: float                                             # annualized return / spread
+    confidence: float = Field(default=0.5, gt=0.0, le=1.0)   # 0..1, higher = view pulls harder
+
+
+class BLAssetPoint(BaseModel):
+    ticker: str
+    prior_return: float          # implied equilibrium (annualized)
+    posterior_return: float      # Black-Litterman blended return (annualized)
+    volatility: float
+    prior_weight: float          # market / equilibrium weight
+    optimal_weight: float        # max-Sharpe weight on posterior returns
+
+
+class BlackLittermanResponse(BaseModel):
+    tickers: List[str]
+    risk_free_rate: float
+    risk_aversion: float
+    tau: float
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    assets: List[BLAssetPoint]
+    prior_weights: Dict[str, float]
+    implied_returns: Dict[str, float]
+    posterior_returns: Dict[str, float]
+    optimal: PortfolioOnFrontier          # max-Sharpe on posterior returns
+    min_variance: PortfolioOnFrontier
+    n_views_applied: int
+    warnings: List[str] = Field(default_factory=list)
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class BlackLittermanRequest(BaseModel):
+    tickers: List[str] = Field(min_length=2, max_length=50)
+    prior_weights: Optional[List[float]] = None             # market / equilibrium weights; default equal
+    views: List[BLView] = Field(default_factory=list)
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
+    risk_aversion: float = Field(default=2.5, ge=0.1, le=20.0)
+    tau: float = Field(default=0.05, gt=0.0, le=1.0)
+    max_weight: float = Field(default=1.0, ge=0.05, le=1.0)
+    min_weight: float = Field(default=0.0, ge=0.0, le=0.5)
 
 
 class PortfolioHealthRequest(BaseModel):
@@ -2510,6 +2568,274 @@ def yahoo_efficient_frontier_post(req: EfficientFrontierRequest):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# Black-Litterman model
+# =========================
+
+def _optimize_with_bounds(
+    objective,
+    n: int,
+    max_weight: float = 1.0,
+    min_weight: float = 0.0,
+) -> Optional[np.ndarray]:
+    """Long-only, fully-invested optimizer with min/max weight per asset.
+
+    Clamps bounds so a feasible sum(w)=1 always exists (n*lo <= 1 <= n*cap).
+    """
+    lo = min(float(min_weight), 1.0 / n)
+    cap = max(min(float(max_weight), 1.0), 1.0 / n)
+    cap = max(cap, lo)
+    w0 = np.full(n, 1.0 / n)
+    bounds = [(lo, cap)] * n
+    constraints = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
+    res = minimize(
+        objective,
+        w0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"maxiter": 300, "ftol": 1e-10, "disp": False},
+    )
+    return res.x if res.success else None
+
+
+def _black_litterman_posterior(
+    cov: np.ndarray,
+    w_mkt: np.ndarray,
+    rf: float,
+    risk_aversion: float,
+    tau: float,
+    P: Optional[np.ndarray],
+    Q: Optional[np.ndarray],
+    confidences: Optional[np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (implied_returns, posterior_returns), both annualized total returns.
+
+    Implied (equilibrium) returns: Pi = rf + delta * cov @ w_mkt.
+    Posterior (master formula): mu_BL = Pi + tauSigma P^T (P tauSigma P^T + Omega)^-1 (Q - P Pi).
+    Omega is diagonal, scaled per-view by confidence: higher confidence -> smaller Omega.
+    """
+    tau_sigma = tau * cov
+    implied = rf + risk_aversion * (cov @ w_mkt)
+
+    if P is None or Q is None or P.shape[0] == 0:
+        return implied, implied.copy()
+
+    # Base view uncertainty proportional to the view portfolio's variance.
+    base = P @ tau_sigma @ P.T                      # k x k
+    diag = np.clip(np.diag(base), 1e-12, None)
+    c = np.clip(confidences, 1e-2, 0.99)
+    # confidence 0.5 -> Omega == base variance; higher confidence -> smaller Omega
+    omega_diag = diag * (1.0 - c) / c
+    omega = np.diag(omega_diag)
+
+    middle = P @ tau_sigma @ P.T + omega
+    try:
+        inv_middle = np.linalg.inv(middle)
+    except np.linalg.LinAlgError:
+        inv_middle = np.linalg.pinv(middle)
+
+    adjustment = tau_sigma @ P.T @ inv_middle @ (Q - P @ implied)
+    posterior = implied + adjustment
+    return implied, posterior
+
+
+def _run_black_litterman(
+    tickers: List[str],
+    prior_weights: Optional[List[float]],
+    views: List[Any],
+    lookback_period: str,
+    auto_adjust: bool,
+    risk_free_rate: float,
+    risk_aversion: float,
+    tau: float,
+    max_weight: float,
+    min_weight: float,
+) -> Dict[str, Any]:
+    if len(tickers) < 2:
+        raise ValueError("At least 2 tickers are required for the Black-Litterman model")
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    # Normalize prior (market) weights aligned to the input ticker order.
+    prior_arr: Optional[np.ndarray] = None
+    if prior_weights is not None:
+        if len(prior_weights) != len(tickers):
+            raise ValueError("prior_weights length must match tickers length")
+        pw = np.array(prior_weights, dtype=float)
+        if np.any(pw < 0):
+            raise ValueError("prior_weights must be non-negative")
+        s = pw.sum()
+        if s > 0:
+            prior_arr = pw / s
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    available = [t for t in tickers if t in close.columns]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    if len(available) < 2:
+        raise ValueError("Need at least 2 tickers with price data for Black-Litterman")
+
+    # Re-align prior weights to available tickers (renormalize); default equal weights.
+    if prior_arr is not None:
+        keep_mask = np.array([t in close.columns for t in tickers])
+        w_kept = prior_arr[keep_mask]
+        sk = w_kept.sum()
+        w_mkt = (w_kept / sk) if sk > 0 else np.full(len(available), 1.0 / len(available))
+    else:
+        w_mkt = np.full(len(available), 1.0 / len(available))
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 30:
+        raise ValueError("Not enough overlapping price observations (need >= 30)")
+
+    log_rets = np.log(prices / prices.shift(1)).dropna()
+    if len(log_rets) < 20:
+        raise ValueError("Not enough return observations for Black-Litterman")
+
+    ann_factor = 252.0
+    cov = log_rets.cov().to_numpy() * ann_factor                # annualized
+    rf = float(risk_free_rate)
+
+    idx = {t: i for i, t in enumerate(available)}
+
+    # Build the picking matrix P and view vector Q from the user's views.
+    rows: List[np.ndarray] = []
+    q_vals: List[float] = []
+    conf_vals: List[float] = []
+    warnings: List[str] = []
+    for v in views:
+        vtype = getattr(v, "view_type", "absolute")
+        asset = getattr(v, "asset", None)
+        if asset not in idx:
+            warnings.append(f"View skipped: '{asset}' has no price data")
+            continue
+        row = np.zeros(len(available))
+        if vtype == "relative":
+            other = getattr(v, "asset_other", None)
+            if other not in idx:
+                warnings.append(f"Relative view skipped: '{other}' has no price data")
+                continue
+            if other == asset:
+                warnings.append(f"Relative view skipped: '{asset}' compared with itself")
+                continue
+            row[idx[asset]] = 1.0
+            row[idx[other]] = -1.0
+        else:
+            row[idx[asset]] = 1.0
+        rows.append(row)
+        q_vals.append(float(getattr(v, "value")))
+        conf_vals.append(float(getattr(v, "confidence", 0.5)))
+
+    if rows:
+        P = np.vstack(rows)
+        Q = np.array(q_vals, dtype=float)
+        confidences = np.array(conf_vals, dtype=float)
+    else:
+        P = None
+        Q = None
+        confidences = None
+
+    implied, posterior = _black_litterman_posterior(
+        cov=cov, w_mkt=w_mkt, rf=rf, risk_aversion=float(risk_aversion),
+        tau=float(tau), P=P, Q=Q, confidences=confidences,
+    )
+
+    n = len(available)
+
+    # Optimal (max-Sharpe on posterior returns) with min/max weight bounds.
+    def neg_sharpe(w):
+        ret = float(np.dot(w, posterior))
+        var = float(w @ cov @ w)
+        vol = float(np.sqrt(max(var, 1e-18)))
+        return -(ret - rf) / vol if vol > 0 else 0.0
+
+    w_opt = _optimize_with_bounds(neg_sharpe, n, max_weight, min_weight)
+    if w_opt is None:
+        warnings.append("Max-Sharpe optimization did not converge; using equal weights")
+        w_opt = np.full(n, 1.0 / n)
+
+    w_minvar = _optimize_with_bounds(lambda w: float(w @ cov @ w), n, max_weight, min_weight)
+    if w_minvar is None:
+        w_minvar = np.full(n, 1.0 / n)
+
+    optimal_desc = _build_portfolio_descriptor(w_opt, available, posterior, cov, rf)
+    minvar_desc = _build_portfolio_descriptor(w_minvar, available, posterior, cov, rf)
+
+    asset_points: List[Dict[str, Any]] = []
+    for i, t in enumerate(available):
+        asset_points.append({
+            "ticker": t,
+            "prior_return": float(implied[i]),
+            "posterior_return": float(posterior[i]),
+            "volatility": float(np.sqrt(max(cov[i, i], 0.0))),
+            "prior_weight": float(w_mkt[i]),
+            "optimal_weight": float(w_opt[i]),
+        })
+
+    out = {
+        "tickers": available,
+        "risk_free_rate": rf,
+        "risk_aversion": float(risk_aversion),
+        "tau": float(tau),
+        "observations": int(len(log_rets)),
+        "start_date_used": log_rets.index[0].date().isoformat(),
+        "end_date_used": log_rets.index[-1].date().isoformat(),
+        "assets": asset_points,
+        "prior_weights": {available[i]: float(w_mkt[i]) for i in range(n)},
+        "implied_returns": {available[i]: float(implied[i]) for i in range(n)},
+        "posterior_returns": {available[i]: float(posterior[i]) for i in range(n)},
+        "optimal": optimal_desc,
+        "min_variance": minvar_desc,
+        "n_views_applied": 0 if P is None else int(P.shape[0]),
+        "warnings": warnings,
+        "errors": errors,
+    }
+    return out
+
+
+@router.post("/yahoo/black-litterman", response_model=BlackLittermanResponse)
+def yahoo_black_litterman_post(req: BlackLittermanRequest):
+    cache_key = (
+        "bl",
+        tuple(req.tickers),
+        None if req.prior_weights is None else tuple(round(float(x), 6) for x in req.prior_weights),
+        tuple((v.view_type, v.asset, v.asset_other, round(v.value, 6), round(v.confidence, 4)) for v in req.views),
+        req.lookback_period,
+        req.auto_adjust,
+        round(float(req.risk_free_rate), 6),
+        round(float(req.risk_aversion), 4),
+        round(float(req.tau), 6),
+        round(float(req.max_weight), 4),
+        round(float(req.min_weight), 4),
+        pd.Timestamp.now().normalize().date().isoformat(),
+    )
+    if cache_key in BL_CACHE:
+        return BL_CACHE[cache_key]
+    try:
+        out = _run_black_litterman(
+            tickers=req.tickers,
+            prior_weights=req.prior_weights,
+            views=req.views,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            risk_free_rate=req.risk_free_rate,
+            risk_aversion=req.risk_aversion,
+            tau=req.tau,
+            max_weight=req.max_weight,
+            min_weight=req.min_weight,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    BL_CACHE[cache_key] = out
+    return out
 
 
 # =========================

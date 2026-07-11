@@ -297,6 +297,54 @@
     let isFetchingEF = false;
     let efError = "";
 
+    // --- Black-Litterman ---
+    type BLView = {
+        view_type: "absolute" | "relative";
+        asset: string;
+        asset_other: string | null;
+        value: number;        // UI: percent (e.g. 8 = 8%)
+        confidence: number;   // UI: percent (e.g. 60 = 60%)
+    };
+
+    type BLAssetPoint = {
+        ticker: string;
+        prior_return: number;
+        posterior_return: number;
+        volatility: number;
+        prior_weight: number;
+        optimal_weight: number;
+    };
+
+    type BlackLittermanResult = {
+        tickers: string[];
+        risk_free_rate: number;
+        risk_aversion: number;
+        tau: number;
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        assets: BLAssetPoint[];
+        prior_weights: Record<string, number>;
+        implied_returns: Record<string, number>;
+        posterior_returns: Record<string, number>;
+        optimal: PortfolioOnFrontier;
+        min_variance: PortfolioOnFrontier;
+        n_views_applied: number;
+        warnings: string[];
+        errors: Record<string, string>;
+    };
+
+    let blResult: BlackLittermanResult | null = null;
+    let blLookback = "3Y";
+    let blRf = 0.02;
+    let blRiskAversion = 2.5;
+    let blTau = 0.05;
+    let blMaxWeight = 1.0;
+    let blMinWeight = 0.0;
+    let blViews: BLView[] = [];
+    let isFetchingBL = false;
+    let blError = "";
+
     type SampledPortfolio = {
         tickers: string[];
         weights: number[];
@@ -696,6 +744,129 @@
             xTicks, yTicks,
             xMin, xMax, yMin, yMax,
         };
+    }
+
+    function blPortfolioTickers(): string[] {
+        if (!positionView) return [];
+        return positionView.rows
+            .filter(r => r.weight !== null && r.weight !== undefined && r.weight > 0)
+            .map(r => r.symbol);
+    }
+
+    function addBLView() {
+        const tickers = blPortfolioTickers();
+        const first = tickers[0] ?? "";
+        const second = tickers.find(t => t !== first) ?? null;
+        blViews = [...blViews, {
+            view_type: "absolute",
+            asset: first,
+            asset_other: second,
+            value: 8,
+            confidence: 60,
+        }];
+    }
+
+    function removeBLView(i: number) {
+        blViews = blViews.filter((_, idx) => idx !== i);
+    }
+
+    async function runBlackLitterman() {
+        if (!positionView || positionView.rows.length < 2) {
+            blError = "Need at least 2 positions to run Black-Litterman.";
+            blResult = null;
+            return;
+        }
+        const eligible = positionView.rows.filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length < 2) {
+            blError = "Need at least 2 positions with a valid market weight.";
+            blResult = null;
+            return;
+        }
+        isFetchingBL = true;
+        blError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                // current portfolio weights are the market/equilibrium prior
+                prior_weights: eligible.map(r => r.weight as number),
+                views: blViews
+                    .filter(v => v.asset && (v.view_type === "absolute" || v.asset_other))
+                    .map(v => ({
+                        view_type: v.view_type,
+                        asset: v.asset,
+                        asset_other: v.view_type === "relative" ? v.asset_other : null,
+                        value: (Number(v.value) || 0) / 100,
+                        confidence: Math.min(0.99, Math.max(0.01, (Number(v.confidence) || 50) / 100)),
+                    })),
+                lookback_period: blLookback,
+                auto_adjust: true,
+                risk_free_rate: blRf,
+                risk_aversion: blRiskAversion,
+                tau: blTau,
+                max_weight: blMaxWeight,
+                min_weight: blMinWeight,
+            };
+            const res = await instance.post<BlackLittermanResult>("/analytics/yahoo/black-litterman", payload);
+            blResult = res.data;
+        } catch (err: any) {
+            blError = err?.response?.data?.detail || err?.message || "Unable to run Black-Litterman.";
+            blResult = null;
+        } finally {
+            isFetchingBL = false;
+        }
+    }
+
+    // Black-Litterman returns chart geometry (grouped columns: implied vs posterior)
+    const BL_W = 960;
+    const BL_H = 360;
+    const BL_PAD = {top: 24, right: 24, bottom: 52, left: 64};
+
+    function getBLChartData(r: BlackLittermanResult | null) {
+        if (!r || r.assets.length === 0) return null;
+        const vals: number[] = [];
+        r.assets.forEach(a => {
+            vals.push(a.prior_return, a.posterior_return);
+        });
+        const lo = Math.min(0, ...vals);
+        const hi = Math.max(0, ...vals);
+        const pad = (hi - lo) * 0.12 || 0.01;
+        const yMin = lo - pad;
+        const yMax = hi + pad;
+
+        const innerW = BL_W - BL_PAD.left - BL_PAD.right;
+        const innerH = BL_H - BL_PAD.top - BL_PAD.bottom;
+
+        const yAt = (v: number) => BL_PAD.top + (1 - (v - yMin) / (yMax - yMin || 1)) * innerH;
+        const n = r.assets.length;
+        const slot = innerW / n;
+        const barW = Math.min(28, slot * 0.32);
+
+        const groups = r.assets.map((a, i) => {
+            const cx = BL_PAD.left + slot * (i + 0.5);
+            return {
+                ticker: a.ticker,
+                cx,
+                priorX: cx - barW - 2,
+                postX: cx + 2,
+                barW,
+                prior: a.prior_return,
+                posterior: a.posterior_return,
+                priorY: yAt(Math.max(a.prior_return, 0)),
+                priorH: Math.abs(yAt(a.prior_return) - yAt(0)),
+                postY: yAt(Math.max(a.posterior_return, 0)),
+                postH: Math.abs(yAt(a.posterior_return) - yAt(0)),
+            };
+        });
+
+        const yTicks: { value: number; y: number }[] = [];
+        for (let i = 0; i <= 5; i++) {
+            const vy = yMin + ((yMax - yMin) * i) / 5;
+            yTicks.push({value: vy, y: yAt(vy)});
+        }
+
+        return {yAt, groups, yTicks, zeroY: yAt(0)};
     }
 
     async function runPortfolioHealth() {
@@ -1918,6 +2089,245 @@
                         {:else if !isFetchingEF}
                             <div class="emptyState">Click "Compute frontier" to build the Markowitz efficient frontier
                                 over the last {efLookback}, mark your portfolio on it, and read suggested weights.
+                            </div>
+                        {/if}
+                    </div>
+
+                    <!-- BLACK-LITTERMAN -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Black-Litterman Model</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={blLookback}>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Risk-free rate</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.001"
+                                       bind:value={blRf}/>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Risk aversion δ</span>
+                                <input class="input mono xsmallInput" type="number" min="0.1" max="20" step="0.1"
+                                       bind:value={blRiskAversion}/>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">τ (tau)</span>
+                                <input class="input mono xsmallInput" type="number" min="0.01" max="1" step="0.01"
+                                       bind:value={blTau}/>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Max weight</span>
+                                <input class="input mono xsmallInput" type="number" min="0.05" max="1" step="0.05"
+                                       bind:value={blMaxWeight}/>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Min weight</span>
+                                <input class="input mono xsmallInput" type="number" min="0" max="0.5" step="0.01"
+                                       bind:value={blMinWeight}/>
+                            </label>
+                            <button class="btn primary xsmall" on:click={runBlackLitterman}
+                                    disabled={isFetchingBL || !positionView || positionView.rows.length < 2}>
+                                {isFetchingBL ? "Blending…" : "Run Black-Litterman"}
+                            </button>
+                        </div>
+
+                        <!-- Investor views editor -->
+                        <div class="blViews">
+                            <div class="blViewsHeader">
+                                <span class="efWeightsTitle">Investor views</span>
+                                <button class="btn ghost xsmall" on:click={addBLView}
+                                        disabled={blPortfolioTickers().length < 2}>+ Add view
+                                </button>
+                            </div>
+                            {#if blViews.length === 0}
+                                <div class="mono soft xsmall">No views — the model returns the market-implied
+                                    (equilibrium) portfolio. Add views to tilt the posterior returns.
+                                </div>
+                            {:else}
+                                {#each blViews as v, i}
+                                    <div class="blViewRow">
+                                        <select class="input mono xsmallInput" bind:value={v.view_type}>
+                                            <option value="absolute">Absolute</option>
+                                            <option value="relative">Relative</option>
+                                        </select>
+                                        <select class="input mono xsmallInput" bind:value={v.asset}>
+                                            {#each blPortfolioTickers() as t}
+                                                <option value={t}>{t}</option>
+                                            {/each}
+                                        </select>
+                                        {#if v.view_type === "relative"}
+                                            <span class="mono soft xsmall">outperforms</span>
+                                            <select class="input mono xsmallInput" bind:value={v.asset_other}>
+                                                {#each blPortfolioTickers() as t}
+                                                    <option value={t}>{t}</option>
+                                                {/each}
+                                            </select>
+                                            <span class="mono soft xsmall">by</span>
+                                        {:else}
+                                            <span class="mono soft xsmall">returns</span>
+                                        {/if}
+                                        <label class="field inlineField">
+                                            <input class="input mono xsmallInput" type="number" step="0.5"
+                                                   bind:value={v.value}/>
+                                            <span class="label">%</span>
+                                        </label>
+                                        <label class="field inlineField">
+                                            <span class="label">confidence</span>
+                                            <input class="input mono xsmallInput" type="number" min="1" max="99" step="1"
+                                                   bind:value={v.confidence}/>
+                                            <span class="label">%</span>
+                                        </label>
+                                        <button class="btn ghost xsmall" on:click={() => removeBLView(i)}>✕</button>
+                                    </div>
+                                {/each}
+                            {/if}
+                        </div>
+
+                        {#if blError}
+                            <div class="errorBox">{blError}</div>
+                        {/if}
+
+                        {#if blResult}
+                            {#each blResult.warnings as w}
+                                <div class="mono soft xsmall">⚠ {w}</div>
+                            {/each}
+
+                            {@const bl = getBLChartData(blResult)}
+                            {#if bl}
+                                <div class="efChartWrap">
+                                    <svg viewBox="0 0 {BL_W} {BL_H}" class="mcChart"
+                                         preserveAspectRatio="xMidYMid meet">
+                                        <!-- Y gridlines + labels -->
+                                        {#each bl.yTicks as tick}
+                                            <line x1={BL_PAD.left} y1={tick.y} x2={BL_W - BL_PAD.right} y2={tick.y}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={BL_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+
+                                        <!-- Zero line -->
+                                        <line x1={BL_PAD.left} y1={bl.zeroY} x2={BL_W - BL_PAD.right} y2={bl.zeroY}
+                                              stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+
+                                        <!-- Y axis label -->
+                                        <text x={14} y={BL_H / 2} fill="rgba(255,255,255,0.55)" font-size="11"
+                                              text-anchor="middle" transform="rotate(-90 14 {BL_H / 2})">Annualized
+                                            return
+                                        </text>
+
+                                        <!-- Grouped bars -->
+                                        {#each bl.groups as g}
+                                            <rect x={g.priorX} y={g.priorY} width={g.barW} height={g.priorH}
+                                                  fill="rgba(235, 235, 245, 0.45)" stroke="rgba(0,0,0,0.3)"
+                                                  stroke-width="0.5">
+                                                <title>{g.ticker} implied (equilibrium): {(g.prior * 100).toFixed(2)}%</title>
+                                            </rect>
+                                            <rect x={g.postX} y={g.postY} width={g.barW} height={g.postH}
+                                                  fill="rgba(0, 212, 255, 0.9)" stroke="rgba(0,0,0,0.3)"
+                                                  stroke-width="0.5">
+                                                <title>{g.ticker} Black-Litterman: {(g.posterior * 100).toFixed(2)}%</title>
+                                            </rect>
+                                            <text x={g.cx} y={BL_H - BL_PAD.bottom + 16} fill="rgba(235,235,245,0.65)"
+                                                  font-size="10" text-anchor="middle" class="mono">{g.ticker}</text>
+                                        {/each}
+
+                                        <!-- Legend -->
+                                        <g transform="translate({BL_W - BL_PAD.right - 200}, {BL_PAD.top + 2})">
+                                            <rect x="0" y="0" width="14" height="10" fill="rgba(235, 235, 245, 0.45)"/>
+                                            <text x="20" y="9" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">
+                                                Implied (equilibrium)
+                                            </text>
+                                            <rect x="0" y="16" width="14" height="10" fill="rgba(0, 212, 255, 0.9)"/>
+                                            <text x="20" y="25" fill="rgba(255,255,255,0.7)" font-size="10" class="mono">
+                                                Black-Litterman
+                                            </text>
+                                        </g>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            <div class="efSummary">
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Optimal (max Sharpe)</div>
+                                    <div class="mcStatValue mono greenText">{blResult.optimal.sharpe.toFixed(2)}</div>
+                                    <div class="mono soft xsmall">vol {formatPct(blResult.optimal.volatility)} ·
+                                        ret {formatPct(blResult.optimal.expected_return)}</div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Min variance</div>
+                                    <div class="mcStatValue mono">{blResult.min_variance.sharpe.toFixed(2)}</div>
+                                    <div class="mono soft xsmall">vol {formatPct(blResult.min_variance.volatility)}
+                                        · ret {formatPct(blResult.min_variance.expected_return)}</div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Views applied</div>
+                                    <div class="mcStatValue mono">{blResult.n_views_applied}</div>
+                                    <div class="mono soft xsmall">δ {blResult.risk_aversion.toFixed(1)} ·
+                                        τ {blResult.tau.toFixed(2)}</div>
+                                </div>
+                            </div>
+
+                            <div class="efWeightsGrid">
+                                <div>
+                                    <div class="efWeightsTitle">Returns & optimal weights</div>
+                                    <div class="tableWrap">
+                                        <table class="kittTable xsmallTable">
+                                            <thead>
+                                            <tr>
+                                                <th>Ticker</th>
+                                                <th>Implied</th>
+                                                <th>BL return</th>
+                                                <th>Prior w</th>
+                                                <th>Optimal w</th>
+                                                <th>Δ</th>
+                                            </tr>
+                                            </thead>
+                                            <tbody>
+                                            {#each blResult.assets as a}
+                                                {@const dRet = a.posterior_return - a.prior_return}
+                                                {@const dW = a.optimal_weight - a.prior_weight}
+                                                <tr>
+                                                    <td><span class="mono">{a.ticker}</span></td>
+                                                    <td><span class="mono soft">{formatPct(a.prior_return)}</span></td>
+                                                    <td><span
+                                                            class="mono {dRet > 0 ? 'greenText' : dRet < 0 ? 'redText' : ''}">{formatPct(a.posterior_return)}</span>
+                                                    </td>
+                                                    <td><span class="mono soft">{formatPct(a.prior_weight)}</span></td>
+                                                    <td><span class="mono">{formatPct(a.optimal_weight)}</span></td>
+                                                    <td><span
+                                                            class="mono {dW > 0 ? 'greenText' : dW < 0 ? 'redText' : ''}">{dW > 0 ? "+" : ""}{formatPct(dW)}</span>
+                                                    </td>
+                                                </tr>
+                                            {/each}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mcFootnote soft">
+                                {blResult.observations} daily log-return observations · {blResult.start_date_used}
+                                → {blResult.end_date_used} · Rf = {formatPct(blResult.risk_free_rate)} · implied returns
+                                Π = Rf + δΣw · posterior blends Π with your views · long-only, weights ∈
+                                [{(blMinWeight * 100).toFixed(0)}%, {(blMaxWeight * 100).toFixed(0)}%]
+                                {#if Object.keys(blResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(blResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingBL}
+                            <div class="emptyState">The Black-Litterman model starts from your portfolio's
+                                market-implied equilibrium returns, then blends in your views to produce posterior
+                                returns and an optimal allocation. Add views (optional) and click "Run
+                                Black-Litterman".
                             </div>
                         {/if}
                     </div>
@@ -3291,6 +3701,35 @@
         color: rgba(235, 235, 245, 0.6);
         margin-bottom: 6px;
         padding-left: 4px;
+    }
+
+    .blViews {
+        margin: 12px 0 4px 0;
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.02);
+    }
+
+    .blViewsHeader {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+    }
+
+    .blViewRow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 6px 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .blViewRow:first-of-type {
+        border-top: none;
     }
 
     .samplerToolbar {
