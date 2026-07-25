@@ -228,6 +228,78 @@
     let isFetchingCorr = false;
     let corrError = "";
 
+    // --- PCA / eigen risk decomposition ---
+    type PCAComponent = {
+        index: number;
+        eigenvalue: number;
+        factor_volatility: number;
+        explained_variance_ratio: number;
+        cumulative_explained: number;
+        portfolio_exposure: number;
+        variance_contribution: number;
+        variance_contribution_pct: number;
+        cumulative_variance_contribution_pct: number;
+        risk_contribution: number;
+        loadings: Record<string, number>;
+        top_positive: string[];
+        top_negative: string[];
+        interpretation: string;
+    };
+
+    type PCAAssetRisk = {
+        ticker: string;
+        weight: number;
+        volatility: number;
+        marginal_contribution_to_risk: number;
+        contribution_to_risk: number;
+        contribution_to_risk_pct: number;
+        pc1_loading: number;
+        pc1_communality: number;
+        top_component: number;
+    };
+
+    type PCAStats = {
+        portfolio_volatility: number;
+        portfolio_variance: number;
+        total_matrix_variance: number;
+        pc1_explained_ratio: number;
+        pc1_variance_contribution_pct: number;
+        n_components_for_80_matrix: number;
+        n_components_for_90_matrix: number;
+        n_components_for_90_portfolio_risk: number;
+        effective_number_of_bets: number;
+        max_contribution_pct: number;
+        diversification_ratio: number;
+        weighted_avg_volatility: number;
+        condition_number: number;
+    };
+
+    type PCARiskResult = {
+        tickers: string[];
+        weights: number[];
+        matrix_type: "covariance" | "correlation";
+        return_mode: "log" | "arith";
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        covariance: number[][];
+        matrix: number[][];
+        components: PCAComponent[];
+        assets: PCAAssetRisk[];
+        stats: PCAStats;
+        warnings: string[];
+        errors: Record<string, string>;
+    };
+
+    let pcaResult: PCARiskResult | null = null;
+    let pcaLookback = "3Y";
+    let pcaMatrixType: "covariance" | "correlation" = "covariance";
+    let pcaNComponents = 8;
+    let isFetchingPCA = false;
+    let pcaError = "";
+    let pcaShowMatrix = false;
+    let pcaSelectedPC: number | null = null;
+
     type PortfolioHealthStats = {
         annualized_return: number;
         annualized_volatility: number;
@@ -967,6 +1039,164 @@
     function corrTextColor(v: number): string {
         const a = Math.abs(v);
         return a > 0.5 ? "#0a0a12" : "rgba(255,255,255,0.85)";
+    }
+
+    // ---------------------------------------------------------------
+    // PCA — diagonalize the variance-covariance matrix, then split the
+    // portfolio variance over the eigenvectors: σ²ₚ = Σ λᵢ (vᵢ'w)²
+    // ---------------------------------------------------------------
+    async function runPCA() {
+        if (!positionView || positionView.rows.length < 2) {
+            pcaError = "Need at least 2 positions to run a PCA risk decomposition.";
+            pcaResult = null;
+            return;
+        }
+        const eligible = positionView.rows.filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length < 2) {
+            pcaError = "Need at least 2 positions with a valid market weight.";
+            pcaResult = null;
+            return;
+        }
+        isFetchingPCA = true;
+        pcaError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                weights: eligible.map(r => r.weight as number),
+                lookback_period: pcaLookback,
+                auto_adjust: true,
+                return_mode: "log",
+                matrix_type: pcaMatrixType,
+                n_components: pcaNComponents,
+                top_loadings: 3
+            };
+            const res = await instance.post<PCARiskResult>("/analytics/yahoo/pca-risk", payload);
+            pcaResult = res.data;
+            pcaSelectedPC = pcaResult?.components?.length ? 1 : null;
+        } catch (err: any) {
+            pcaError = err?.response?.data?.detail || err?.message || "Unable to run the PCA risk decomposition.";
+            pcaResult = null;
+        } finally {
+            isFetchingPCA = false;
+        }
+    }
+
+    // Variance-decomposition chart: matrix eigenvalue share vs. share of YOUR variance,
+    // plus the cumulative curve of your variance.
+    const PCA_W = 960;
+    const PCA_H = 380;
+    const PCA_PAD = {top: 28, right: 58, bottom: 64, left: 66};
+
+    function getPCAChartData(r: PCARiskResult | null) {
+        if (!r || r.components.length === 0) return null;
+        const comps = r.components;
+        const rawMax = Math.max(
+            ...comps.map(c => Math.max(c.variance_contribution_pct, c.explained_variance_ratio))
+        );
+        const yMax = Math.min(1, Math.max(0.05, rawMax * 1.12));
+
+        const innerW = PCA_W - PCA_PAD.left - PCA_PAD.right;
+        const innerH = PCA_H - PCA_PAD.top - PCA_PAD.bottom;
+
+        const yAt = (v: number) => PCA_PAD.top + (1 - v / yMax) * innerH;
+        const yCum = (v: number) => PCA_PAD.top + (1 - v) * innerH;
+        const baseY = PCA_PAD.top + innerH;
+
+        const n = comps.length;
+        const slot = innerW / n;
+        const barW = Math.min(24, slot * 0.32);
+
+        const bars = comps.map((c, i) => {
+            const cx = PCA_PAD.left + slot * (i + 0.5);
+            return {
+                c,
+                cx,
+                mktX: cx - barW - 2,
+                portX: cx + 2,
+                barW,
+                mktY: yAt(c.explained_variance_ratio),
+                mktH: Math.max(0, baseY - yAt(c.explained_variance_ratio)),
+                portY: yAt(c.variance_contribution_pct),
+                portH: Math.max(0, baseY - yAt(c.variance_contribution_pct)),
+                cumY: yCum(c.cumulative_variance_contribution_pct)
+            };
+        });
+
+        const cumPath = bars
+            .map((b, i) => `${i === 0 ? "M" : "L"}${b.cx.toFixed(2)},${b.cumY.toFixed(2)}`)
+            .join(" ");
+
+        const yTicks: { value: number; y: number }[] = [];
+        for (let i = 0; i <= 4; i++) {
+            const v = (yMax * i) / 4;
+            yTicks.push({value: v, y: yAt(v)});
+        }
+
+        const cumTicks = [0, 0.25, 0.5, 0.75, 1].map(v => ({value: v, y: yCum(v)}));
+
+        return {bars, cumPath, yTicks, cumTicks, baseY, yCum};
+    }
+
+    // Loadings are unit-norm, so raw magnitudes are small (≈1/√n). Normalize on the
+    // largest absolute loading shown so the heatmap stays readable.
+    function pcaLoadingColor(v: number, maxAbs: number): string {
+        const scaled = maxAbs > 1e-9 ? Math.max(-1, Math.min(1, v / maxAbs)) : 0;
+        return corrCellColor(scaled);
+    }
+
+    function pcaMaxAbsLoading(r: PCARiskResult | null): number {
+        if (!r) return 1;
+        let m = 0;
+        r.components.forEach(c => Object.values(c.loadings).forEach(v => {
+            const a = Math.abs(v);
+            if (a > m) m = a;
+        }));
+        return m || 1;
+    }
+
+    // "How many independent bets am I really running?" — entropy-based effective
+    // number of bets vs. the number of positions held.
+    function pcaConcentrationClass(r: PCARiskResult): string {
+        const share = r.stats.pc1_variance_contribution_pct;
+        if (share >= 0.75) return "redText";
+        if (share >= 0.5) return "";
+        return "greenText";
+    }
+
+    function pcaVerdict(r: PCARiskResult): string {
+        const s = r.stats;
+        const n = r.tickers.length;
+        const pc1 = s.pc1_variance_contribution_pct;
+        const enb = s.effective_number_of_bets;
+        const k90 = s.n_components_for_90_portfolio_risk;
+
+        let head: string;
+        if (pc1 >= 0.75) {
+            head = `Highly concentrated risk: ${(pc1 * 100).toFixed(0)}% of your variance comes from a single ` +
+                `principal component. Your ${n} positions behave like one bet.`;
+        } else if (pc1 >= 0.5) {
+            head = `Moderately concentrated: the first component carries ${(pc1 * 100).toFixed(0)}% of your variance. ` +
+                `One shared driver dominates your ${n} positions.`;
+        } else {
+            head = `Reasonably spread: no single component exceeds ${(s.max_contribution_pct * 100).toFixed(0)}% ` +
+                `of your variance across ${n} positions.`;
+        }
+
+        const bets = `You are effectively running ${enb.toFixed(1)} independent bets out of ${n} holdings, ` +
+            `and ${k90} component${k90 > 1 ? "s" : ""} explain${k90 > 1 ? "" : "s"} 90% of your risk.`;
+
+        const cond = s.condition_number > 100
+            ? ` The covariance matrix is ill-conditioned (κ = ${s.condition_number.toFixed(0)}): some holdings are near-duplicates of each other.`
+            : "";
+
+        return `${head} ${bets}${cond}`;
+    }
+
+    function pcaExposureLabel(c: PCAComponent): string {
+        const dir = c.portfolio_exposure >= 0 ? "long" : "short";
+        return `${dir} ${Math.abs(c.portfolio_exposure).toFixed(3)}`;
     }
 
     async function createTransaction() {
@@ -2455,6 +2685,469 @@
                         {/if}
                     </div>
 
+                    <!-- PCA RISK DECOMPOSITION -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Risk Decomposition — PCA on the Variance-Covariance Matrix</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={pcaLookback}>
+                                    <option value="6M">6 Months</option>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Diagonalize</span>
+                                <select class="input mono xsmallInput" bind:value={pcaMatrixType}>
+                                    <option value="covariance">Covariance (Σ)</option>
+                                    <option value="correlation">Correlation (R)</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Components</span>
+                                <input class="input mono xsmallInput" type="number" min="1" max="30" step="1"
+                                       bind:value={pcaNComponents}/>
+                            </label>
+                            <button class="btn primary xsmall" on:click={runPCA}
+                                    disabled={isFetchingPCA || !positionView || positionView.rows.length < 2}>
+                                {isFetchingPCA ? "Diagonalizing…" : "Decompose risk"}
+                            </button>
+                            {#if pcaResult}
+                                <button class="btn ghost xsmall" on:click={() => (pcaShowMatrix = !pcaShowMatrix)}>
+                                    {pcaShowMatrix ? "Hide Σ matrix" : "Show Σ matrix"}
+                                </button>
+                            {/if}
+                        </div>
+
+                        {#if pcaError}
+                            <div class="errorBox">{pcaError}</div>
+                        {/if}
+
+                        {#if pcaResult}
+                            {#each pcaResult.warnings as w}
+                                <div class="mono soft xsmall">⚠ {w}</div>
+                            {/each}
+
+                            <!-- Plain-language read of where the risk actually sits -->
+                            <div class="pcaVerdict {pcaConcentrationClass(pcaResult)}">
+                                {pcaVerdict(pcaResult)}
+                            </div>
+
+                            <div class="mcStatsGrid">
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Portfolio volatility</div>
+                                    <div class="mcStatValue mono">{formatPct(pcaResult.stats.portfolio_volatility)}</div>
+                                    <div class="mono soft xsmall">σ²ₚ
+                                        = {pcaResult.stats.portfolio_variance.toFixed(5)}</div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">PC1 share of your risk</div>
+                                    <div class="mcStatValue mono {pcaConcentrationClass(pcaResult)}">
+                                        {formatPct(pcaResult.stats.pc1_variance_contribution_pct)}
+                                    </div>
+                                    <div class="mono soft xsmall">
+                                        {formatPct(pcaResult.stats.pc1_explained_ratio)} of matrix variance
+                                    </div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Effective nb of bets</div>
+                                    <div class="mcStatValue mono {pcaResult.stats.effective_number_of_bets < 2 ? 'redText' : pcaResult.stats.effective_number_of_bets > 4 ? 'greenText' : ''}">
+                                        {formatNum(pcaResult.stats.effective_number_of_bets, 2)}
+                                    </div>
+                                    <div class="mono soft xsmall">of {pcaResult.tickers.length} holdings</div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">PCs for 90% of your risk</div>
+                                    <div class="mcStatValue mono">{pcaResult.stats.n_components_for_90_portfolio_risk}</div>
+                                    <div class="mono soft xsmall">
+                                        matrix needs {pcaResult.stats.n_components_for_90_matrix}
+                                    </div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Diversification ratio</div>
+                                    <div class="mcStatValue mono {pcaResult.stats.diversification_ratio > 1.3 ? 'greenText' : pcaResult.stats.diversification_ratio < 1.1 ? 'redText' : ''}">
+                                        {formatNum(pcaResult.stats.diversification_ratio, 3)}
+                                    </div>
+                                    <div class="mono soft xsmall">Σwᵢσᵢ /
+                                        σₚ = {formatPct(pcaResult.stats.weighted_avg_volatility)}</div>
+                                </div>
+                                <div class="mcStat">
+                                    <div class="mcStatLabel">Condition number κ</div>
+                                    <div class="mcStatValue mono {pcaResult.stats.condition_number > 100 ? 'redText' : ''}">
+                                        {formatNum(pcaResult.stats.condition_number, 1)}
+                                    </div>
+                                    <div class="mono soft xsmall">λmax / λmin</div>
+                                </div>
+                            </div>
+
+                            {@const pca = getPCAChartData(pcaResult)}
+                            {#if pca}
+                                <div class="efChartWrap">
+                                    <svg viewBox="0 0 {PCA_W} {PCA_H}" class="mcChart"
+                                         preserveAspectRatio="xMidYMid meet">
+                                        <!-- Left axis: share of variance -->
+                                        {#each pca.yTicks as tick}
+                                            <line x1={PCA_PAD.left} y1={tick.y} x2={PCA_W - PCA_PAD.right} y2={tick.y}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={PCA_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
+                                                {(tick.value * 100).toFixed(0)}%
+                                            </text>
+                                        {/each}
+
+                                        <!-- Right axis: cumulative share of portfolio variance -->
+                                        {#each pca.cumTicks as tick}
+                                            <text x={PCA_W - PCA_PAD.right + 8} y={tick.y + 3}
+                                                  fill="rgba(0,212,255,0.5)" font-size="10" text-anchor="start"
+                                                  class="mono">
+                                                {(tick.value * 100).toFixed(0)}%
+                                            </text>
+                                        {/each}
+
+                                        <text x={16} y={PCA_H / 2} fill="rgba(255,255,255,0.55)" font-size="11"
+                                              text-anchor="middle" transform="rotate(-90 16 {PCA_H / 2})">
+                                            Share of variance
+                                        </text>
+                                        <text x={PCA_W - 12} y={PCA_H / 2} fill="rgba(0,212,255,0.55)" font-size="11"
+                                              text-anchor="middle" transform="rotate(90 {PCA_W - 12} {PCA_H / 2})">
+                                            Cumulative (your risk)
+                                        </text>
+
+                                        <!-- 90% reference on the cumulative axis -->
+                                        <line x1={PCA_PAD.left} y1={pca.yCum(0.9)} x2={PCA_W - PCA_PAD.right}
+                                              y2={pca.yCum(0.9)} stroke="rgba(255,255,255,0.18)" stroke-width="1"
+                                              stroke-dasharray="3 4"/>
+
+                                        <!-- Grouped bars: eigenvalue weight in the matrix vs. in YOUR portfolio -->
+                                        {#each pca.bars as b}
+                                            <g class="pcaBarGroup"
+                                               on:click={() => (pcaSelectedPC = b.c.index)}
+                                               on:keydown={(e) => { if (e.key === "Enter") pcaSelectedPC = b.c.index; }}
+                                               role="button" tabindex="0">
+                                                {#if pcaSelectedPC === b.c.index}
+                                                    <rect x={b.cx - b.barW - 6} y={PCA_PAD.top}
+                                                          width={b.barW * 2 + 12} height={pca.baseY - PCA_PAD.top}
+                                                          fill="rgba(0,212,255,0.06)" rx="3"/>
+                                                {/if}
+                                                <rect x={b.mktX} y={b.mktY} width={b.barW} height={b.mktH}
+                                                      fill="rgba(235, 235, 245, 0.35)" stroke="rgba(0,0,0,0.3)"
+                                                      stroke-width="0.5" rx="1">
+                                                    <title>PC{b.c.index} eigenvalue λ = {b.c.eigenvalue.toFixed(5)} → {(b.c.explained_variance_ratio * 100).toFixed(2)}% of the matrix variance</title>
+                                                </rect>
+                                                <rect x={b.portX} y={b.portY} width={b.barW} height={b.portH}
+                                                      fill="rgba(0, 212, 255, 0.9)" stroke="rgba(0,0,0,0.3)"
+                                                      stroke-width="0.5" rx="1">
+                                                    <title>PC{b.c.index} contributes {(b.c.variance_contribution_pct * 100).toFixed(2)}% of YOUR portfolio variance (λ·y² = {b.c.variance_contribution.toFixed(6)})</title>
+                                                </rect>
+                                                <text x={b.cx} y={PCA_H - PCA_PAD.bottom + 16}
+                                                      fill={pcaSelectedPC === b.c.index ? "rgba(0,212,255,0.95)" : "rgba(235,235,245,0.65)"}
+                                                      font-size="10" text-anchor="middle" class="mono">
+                                                    PC{b.c.index}
+                                                </text>
+                                                <text x={b.cx} y={PCA_H - PCA_PAD.bottom + 30}
+                                                      fill="rgba(255,255,255,0.35)" font-size="9" text-anchor="middle"
+                                                      class="mono">
+                                                    {formatPct(b.c.factor_volatility)}
+                                                </text>
+                                            </g>
+                                        {/each}
+
+                                        <!-- Cumulative curve of YOUR variance -->
+                                        <path d={pca.cumPath} fill="none" stroke="rgba(0,212,255,0.75)"
+                                              stroke-width="1.5" stroke-dasharray="5 3"/>
+                                        {#each pca.bars as b}
+                                            <circle cx={b.cx} cy={b.cumY} r="3" fill="rgba(0,212,255,0.95)">
+                                                <title>Cumulative through PC{b.c.index}: {(b.c.cumulative_variance_contribution_pct * 100).toFixed(2)}% of your variance</title>
+                                            </circle>
+                                        {/each}
+
+                                        <!-- Baseline -->
+                                        <line x1={PCA_PAD.left} y1={pca.baseY} x2={PCA_W - PCA_PAD.right}
+                                              y2={pca.baseY} stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+
+                                        <!-- Legend -->
+                                        <g transform="translate({PCA_PAD.left + 8}, {PCA_PAD.top - 18})">
+                                            <rect x="0" y="0" width="14" height="10"
+                                                  fill="rgba(235, 235, 245, 0.35)"/>
+                                            <text x="20" y="9" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">
+                                                Eigenvalue share of Σ
+                                            </text>
+                                            <rect x="180" y="0" width="14" height="10" fill="rgba(0, 212, 255, 0.9)"/>
+                                            <text x="200" y="9" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">
+                                                Share of YOUR variance
+                                            </text>
+                                            <line x1="370" y1="5" x2="392" y2="5" stroke="rgba(0,212,255,0.75)"
+                                                  stroke-width="1.5" stroke-dasharray="5 3"/>
+                                            <text x="398" y="9" fill="rgba(255,255,255,0.7)" font-size="10"
+                                                  class="mono">
+                                                Cumulative
+                                            </text>
+                                        </g>
+                                    </svg>
+                                </div>
+                                <div class="mono soft xsmall pcaChartHint">
+                                    A tall grey bar with a short cyan bar means a large eigenvalue your weights barely
+                                    touch — a market risk you are already netting out. Tall cyan = risk you actually
+                                    carry. Click a component to inspect its loadings.
+                                </div>
+                            {/if}
+
+                            <!-- Eigenvalue table -->
+                            <div class="efWeightsTitle pcaBlockTitle">Eigenvalues & contribution to portfolio variance
+                            </div>
+                            <div class="tableWrap">
+                                <table class="kittTable xsmallTable">
+                                    <thead>
+                                    <tr>
+                                        <th>PC</th>
+                                        <th>λ (eigenvalue)</th>
+                                        <th>Factor vol √λ</th>
+                                        <th>% of Σ</th>
+                                        <th>Exposure vᵢ'w</th>
+                                        <th>λ·y² (variance)</th>
+                                        <th>% of your var</th>
+                                        <th>Cumul.</th>
+                                        <th>What it is</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each pcaResult.components as c}
+                                        <tr class="pcaRow {pcaSelectedPC === c.index ? 'pcaRowActive' : ''}"
+                                            on:click={() => (pcaSelectedPC = c.index)}>
+                                            <td><span class="mono">PC{c.index}</span></td>
+                                            <td><span class="mono">{c.eigenvalue.toFixed(5)}</span></td>
+                                            <td><span class="mono soft">{formatPct(c.factor_volatility)}</span></td>
+                                            <td><span class="mono soft">{formatPct(c.explained_variance_ratio)}</span>
+                                            </td>
+                                            <td><span
+                                                    class="mono {c.portfolio_exposure >= 0 ? '' : 'redText'}">{c.portfolio_exposure >= 0 ? "+" : ""}{c.portfolio_exposure.toFixed(4)}</span>
+                                            </td>
+                                            <td><span class="mono soft">{c.variance_contribution.toFixed(6)}</span></td>
+                                            <td>
+                                                <div class="riskBarCell">
+                                                    <div class="riskBarTrack">
+                                                        <div class="riskBarFill"
+                                                             style="width: {Math.min(100, c.variance_contribution_pct * 100)}%"></div>
+                                                    </div>
+                                                    <span class="mono {c.variance_contribution_pct > 0.5 ? 'redText' : ''}">{formatPct(c.variance_contribution_pct)}</span>
+                                                </div>
+                                            </td>
+                                            <td><span
+                                                    class="mono soft">{formatPct(c.cumulative_variance_contribution_pct)}</span>
+                                            </td>
+                                            <td><span class="pcaInterp">{c.interpretation}</span></td>
+                                        </tr>
+                                    {/each}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Selected component: eigenvector loadings -->
+                            {@const sel = pcaResult.components.find(c => c.index === pcaSelectedPC)}
+                            {#if sel}
+                                {@const selMax = Math.max(...Object.values(sel.loadings).map(v => Math.abs(v)), 1e-9)}
+                                <div class="pcaDetail">
+                                    <div class="efWeightsTitle">Eigenvector PC{sel.index} — who loads on this risk
+                                        factor
+                                    </div>
+                                    <div class="mono soft xsmall pcaDetailMeta">
+                                        λ = {sel.eigenvalue.toFixed(5)} · factor vol {formatPct(sel.factor_volatility)}
+                                        · your exposure {pcaExposureLabel(sel)} ·
+                                        drives {formatPct(sel.variance_contribution_pct)} of your variance
+                                    </div>
+                                    <div class="pcaLoadings">
+                                        {#each pcaResult.tickers as t}
+                                            {@const v = sel.loadings[t] ?? 0}
+                                            {@const half = (Math.abs(v) / selMax) * 50}
+                                            <div class="pcaLoadRow">
+                                                <span class="pcaLoadTicker mono">{t}</span>
+                                                <div class="pcaLoadTrack">
+                                                    <div class="pcaLoadCenter"></div>
+                                                    <div class="pcaLoadFill"
+                                                         style="left: {v >= 0 ? 50 : 50 - half}%; width: {half}%; background: {v >= 0 ? 'rgba(0,212,255,0.75)' : 'rgba(255,0,60,0.7)'}"></div>
+                                                </div>
+                                                <span class="pcaLoadVal mono {v >= 0 ? '' : 'redText'}">{v >= 0 ? "+" : ""}{v.toFixed(3)}</span>
+                                            </div>
+                                        {/each}
+                                    </div>
+                                </div>
+                            {/if}
+
+                            <!-- Full loadings heatmap -->
+                            {@const maxAbs = pcaMaxAbsLoading(pcaResult)}
+                            <div class="efWeightsTitle pcaBlockTitle">Loadings heatmap — assets × principal components
+                            </div>
+                            <div class="corrMatrixWrap">
+                                <table class="corrMatrix">
+                                    <thead>
+                                    <tr>
+                                        <th></th>
+                                        {#each pcaResult.components as c}
+                                            <th class="corrTickerHead">
+                                                <span class="mono">PC{c.index}</span>
+                                            </th>
+                                        {/each}
+                                    </tr>
+                                    <tr>
+                                        <th class="corrTickerHead rowHead"><span class="mono xsmall">% your var</span>
+                                        </th>
+                                        {#each pcaResult.components as c}
+                                            <th>
+                                                <span class="mono soft xsmall">{(c.variance_contribution_pct * 100).toFixed(1)}%</span>
+                                            </th>
+                                        {/each}
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each pcaResult.tickers as t}
+                                        <tr>
+                                            <th class="corrTickerHead rowHead"><span class="mono">{t}</span></th>
+                                            {#each pcaResult.components as c}
+                                                {@const v = c.loadings[t] ?? 0}
+                                                <td class="corrCell"
+                                                    style="background: {pcaLoadingColor(v, maxAbs)}; color: {corrTextColor(v / maxAbs)};"
+                                                    title="{t} on PC{c.index}: {v.toFixed(4)}">
+                                                    <span class="mono">{v.toFixed(2)}</span>
+                                                </td>
+                                            {/each}
+                                        </tr>
+                                    {/each}
+                                    </tbody>
+                                </table>
+                                <div class="corrLegend">
+                                    <span class="corrLegendItem"><span class="corrSwatch"
+                                                                       style="background: {corrCellColor(-1)};"></span> negative loading</span>
+                                    <span class="corrLegendItem"><span class="corrSwatch"
+                                                                       style="background: {corrCellColor(0)};"></span> ~0</span>
+                                    <span class="corrLegendItem"><span class="corrSwatch"
+                                                                       style="background: {corrCellColor(1)};"></span> positive loading</span>
+                                    <span class="corrLegendItem">scaled on max |loading|
+                                        = {maxAbs.toFixed(3)}</span>
+                                </div>
+                            </div>
+
+                            <!-- Per-asset risk attribution -->
+                            <div class="efWeightsTitle pcaBlockTitle">Where the risk sits, position by position</div>
+                            <div class="tableWrap">
+                                <table class="kittTable xsmallTable">
+                                    <thead>
+                                    <tr>
+                                        <th>Ticker</th>
+                                        <th>Weight</th>
+                                        <th>Volatility</th>
+                                        <th>Marginal risk</th>
+                                        <th>Risk contribution</th>
+                                        <th>% of portfolio risk</th>
+                                        <th>PC1 loading</th>
+                                        <th>PC1 explains</th>
+                                        <th>Main PC</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each [...pcaResult.assets].sort((a, b) => b.contribution_to_risk_pct - a.contribution_to_risk_pct) as a}
+                                        <tr>
+                                            <td><span class="mono">{a.ticker}</span></td>
+                                            <td><span class="mono soft">{formatPct(a.weight)}</span></td>
+                                            <td><span class="mono">{formatPct(a.volatility)}</span></td>
+                                            <td><span class="mono soft">{formatPct(a.marginal_contribution_to_risk)}</span>
+                                            </td>
+                                            <td><span class="mono">{formatPct(a.contribution_to_risk)}</span></td>
+                                            <td>
+                                                <div class="riskBarCell">
+                                                    <div class="riskBarTrack">
+                                                        <div class="riskBarFill"
+                                                             style="width: {Math.min(100, Math.max(0, a.contribution_to_risk_pct * 100))}%"></div>
+                                                    </div>
+                                                    <span class="mono {a.contribution_to_risk_pct > a.weight * 1.25 ? 'redText' : a.contribution_to_risk_pct < a.weight * 0.75 ? 'greenText' : ''}">
+                                                        {formatPct(a.contribution_to_risk_pct)}
+                                                    </span>
+                                                </div>
+                                            </td>
+                                            <td><span
+                                                    class="mono {a.pc1_loading >= 0 ? '' : 'redText'}">{a.pc1_loading >= 0 ? "+" : ""}{a.pc1_loading.toFixed(3)}</span>
+                                            </td>
+                                            <td><span
+                                                    class="mono soft">{formatPct(a.pc1_communality)}</span></td>
+                                            <td><span class="mono">PC{a.top_component}</span></td>
+                                        </tr>
+                                    {/each}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="mono soft xsmall pcaChartHint">
+                                Green in "% of portfolio risk" = the position carries less risk than its weight
+                                (a diversifier); red = it carries more risk than its weight. Risk contributions sum
+                                to the portfolio volatility {formatPct(pcaResult.stats.portfolio_volatility)}.
+                            </div>
+
+                            <!-- Raw variance-covariance matrix -->
+                            {#if pcaShowMatrix}
+                                {@const covMax = Math.max(...pcaResult.covariance.flat().map(v => Math.abs(v)), 1e-12)}
+                                <div class="efWeightsTitle pcaBlockTitle">Annualized variance-covariance matrix Σ</div>
+                                <div class="corrMatrixWrap">
+                                    <table class="corrMatrix">
+                                        <thead>
+                                        <tr>
+                                            <th></th>
+                                            {#each pcaResult.tickers as t}
+                                                <th class="corrTickerHead"><span class="mono">{t}</span></th>
+                                            {/each}
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        {#each pcaResult.tickers as rowTicker, i}
+                                            <tr>
+                                                <th class="corrTickerHead rowHead"><span
+                                                        class="mono">{rowTicker}</span></th>
+                                                {#each pcaResult.tickers as colTicker, j}
+                                                    <td class="corrCell"
+                                                        style="background: {pcaLoadingColor(pcaResult.covariance[i][j], covMax)}; color: {corrTextColor(pcaResult.covariance[i][j] / covMax)};"
+                                                        title="cov({rowTicker}, {colTicker}) = {pcaResult.covariance[i][j].toFixed(6)}{i === j ? ` → vol ${(Math.sqrt(Math.max(pcaResult.covariance[i][j], 0)) * 100).toFixed(2)}%` : ''}">
+                                                        <span class="mono">{(pcaResult.covariance[i][j] * 1000).toFixed(2)}</span>
+                                                    </td>
+                                                {/each}
+                                            </tr>
+                                        {/each}
+                                        </tbody>
+                                    </table>
+                                    <div class="corrLegend">
+                                        <span class="corrLegendItem">values ×1000 · diagonal = variance (σᵢ²)</span>
+                                        <span class="corrLegendItem">trace
+                                            = {pcaResult.stats.total_matrix_variance.toFixed(5)}</span>
+                                    </div>
+                                </div>
+                            {/if}
+
+                            <div class="mcFootnote soft">
+                                {pcaResult.observations} daily log-return
+                                observations · {pcaResult.start_date_used}
+                                → {pcaResult.end_date_used} · diagonalized
+                                the {pcaResult.matrix_type === "covariance" ? "covariance matrix Σ" : "correlation matrix R"}
+                                of {pcaResult.tickers.length} holdings · Σ = VΛV′ with V orthonormal, so
+                                σ²ₚ = w′Σw = Σᵢ λᵢ (vᵢ′w)² — each bar is one exact, additive slice of your variance
+                                {#if pcaResult.matrix_type === "correlation"}
+                                    (weights vol-scaled by w̃ = Dw so the identity still holds exactly)
+                                {/if}
+                                {#if Object.keys(pcaResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(pcaResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingPCA}
+                            <div class="emptyState">Diagonalizes your portfolio's variance-covariance matrix into
+                                orthogonal risk factors (principal components) and splits your variance exactly across
+                                them: σ²ₚ = Σᵢ λᵢ (vᵢ′w)². A big eigenvalue only hurts if your weights are exposed to
+                                it — this tells you which components actually drive your risk, which holdings load on
+                                them, and how many independent bets you are really running. Click "Decompose risk".
+                            </div>
+                        {/if}
+                    </div>
+
                     <!-- RANDOM PORTFOLIO SAMPLER -->
                     <div class="mcSection">
                         <div class="sectionTitle">Portfolio Discovery</div>
@@ -3605,6 +4298,162 @@
         height: 14px;
         border-radius: 3px;
         border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    /* --- PCA risk decomposition --- */
+
+    .pcaVerdict {
+        margin: 8px 0 16px 0;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-left: 3px solid rgba(0, 212, 255, 0.7);
+        background: rgba(0, 212, 255, 0.04);
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: rgba(235, 235, 245, 0.85);
+    }
+
+    .pcaVerdict.redText {
+        border-left-color: rgba(255, 0, 60, 0.75);
+        background: rgba(255, 0, 60, 0.05);
+        color: rgba(235, 235, 245, 0.85);
+    }
+
+    .pcaVerdict.greenText {
+        border-left-color: rgba(0, 220, 130, 0.7);
+        background: rgba(0, 220, 130, 0.04);
+        color: rgba(235, 235, 245, 0.85);
+    }
+
+    .pcaBlockTitle {
+        margin-top: 24px;
+    }
+
+    .pcaChartHint {
+        margin-top: 8px;
+        line-height: 1.5;
+        max-width: 900px;
+    }
+
+    .pcaBarGroup {
+        cursor: pointer;
+    }
+
+    .pcaBarGroup:hover rect {
+        filter: brightness(1.15);
+    }
+
+    .pcaBarGroup:focus {
+        outline: none;
+    }
+
+    .pcaRow {
+        cursor: pointer;
+    }
+
+    .pcaRow:hover {
+        background: rgba(255, 255, 255, 0.03);
+    }
+
+    .pcaRowActive {
+        background: rgba(0, 212, 255, 0.07);
+    }
+
+    .pcaInterp {
+        font-size: 11px;
+        color: rgba(235, 235, 245, 0.6);
+        line-height: 1.45;
+        display: inline-block;
+        max-width: 420px;
+    }
+
+    .riskBarCell {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 130px;
+    }
+
+    .riskBarTrack {
+        flex: 1;
+        height: 6px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.07);
+        overflow: hidden;
+        min-width: 50px;
+    }
+
+    .riskBarFill {
+        height: 100%;
+        border-radius: 3px;
+        background: linear-gradient(90deg, rgba(0, 212, 255, 0.55), rgba(0, 212, 255, 0.95));
+    }
+
+    .pcaDetail {
+        margin-top: 24px;
+        background: rgba(0, 0, 0, 0.18);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 12px;
+        padding: 16px;
+    }
+
+    .pcaDetailMeta {
+        margin-bottom: 12px;
+    }
+
+    .pcaLoadings {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 6px 24px;
+    }
+
+    .pcaLoadRow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 11px;
+    }
+
+    .pcaLoadTicker {
+        width: 78px;
+        flex: none;
+        color: rgba(235, 235, 245, 0.8);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .pcaLoadTrack {
+        position: relative;
+        flex: 1;
+        height: 12px;
+        min-width: 90px;
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 3px;
+    }
+
+    .pcaLoadCenter {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        bottom: 0;
+        width: 1px;
+        background: rgba(255, 255, 255, 0.2);
+    }
+
+    .pcaLoadFill {
+        position: absolute;
+        top: 2px;
+        bottom: 2px;
+        border-radius: 2px;
+    }
+
+    .pcaLoadVal {
+        width: 56px;
+        flex: none;
+        text-align: right;
+        color: rgba(235, 235, 245, 0.75);
     }
 
     .corrStatsPanel {

@@ -57,6 +57,8 @@ SAMPLER_CACHE = TTLCache(maxsize=100, ttl=600)
 
 BL_CACHE = TTLCache(maxsize=200, ttl=600)
 
+PCA_CACHE = TTLCache(maxsize=200, ttl=600)
+
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
     "1Y": 365, "2Y": 730, "3Y": 1095,
@@ -502,6 +504,84 @@ class BlackLittermanRequest(BaseModel):
     tau: float = Field(default=0.05, gt=0.0, le=1.0)
     max_weight: float = Field(default=1.0, ge=0.05, le=1.0)
     min_weight: float = Field(default=0.0, ge=0.0, le=0.5)
+
+
+# --- PCA / eigen risk decomposition ---
+
+PCAMatrixType = Literal["covariance", "correlation"]
+
+
+class PCAComponent(BaseModel):
+    index: int                                      # 1-based principal component number
+    eigenvalue: float                               # variance carried by the component (annualized)
+    factor_volatility: float                        # sqrt(eigenvalue) = annualized vol of the factor
+    explained_variance_ratio: float                 # eigenvalue / trace of the diagonalized matrix
+    cumulative_explained: float
+    portfolio_exposure: float                       # y_i = v_i' w~  (signed coordinate in eigenbasis)
+    variance_contribution: float                    # lambda_i * y_i^2 (annualized variance)
+    variance_contribution_pct: float                # share of portfolio variance
+    cumulative_variance_contribution_pct: float
+    risk_contribution: float                        # lambda_i * y_i^2 / sigma_p (vol units, sums to sigma_p)
+    loadings: Dict[str, float]                      # ticker -> eigenvector coefficient
+    top_positive: List[str]
+    top_negative: List[str]
+    interpretation: str
+
+
+class PCAAssetRisk(BaseModel):
+    ticker: str
+    weight: float
+    volatility: float                               # annualized
+    marginal_contribution_to_risk: float            # (Sigma w)_i / sigma_p
+    contribution_to_risk: float                     # w_i * MCTR_i (sums to sigma_p)
+    contribution_to_risk_pct: float                 # share of portfolio risk
+    pc1_loading: float
+    pc1_communality: float                          # share of the asset's own variance explained by PC1
+    top_component: int                              # 1-based PC this asset loads most on
+
+
+class PCAStats(BaseModel):
+    portfolio_volatility: float                     # annualized
+    portfolio_variance: float
+    total_matrix_variance: float                    # trace of the diagonalized matrix
+    pc1_explained_ratio: float                      # PC1 share of the matrix variance
+    pc1_variance_contribution_pct: float            # PC1 share of *your* portfolio variance
+    n_components_for_80_matrix: int
+    n_components_for_90_matrix: int
+    n_components_for_90_portfolio_risk: int
+    effective_number_of_bets: float                 # exp(entropy of portfolio variance contributions)
+    max_contribution_pct: float
+    diversification_ratio: float                    # sum(w_i * sigma_i) / sigma_p
+    weighted_avg_volatility: float
+    condition_number: float                         # lambda_max / lambda_min (redundancy flag)
+
+
+class PCARiskResponse(BaseModel):
+    tickers: List[str]
+    weights: List[float]
+    matrix_type: PCAMatrixType
+    return_mode: ReturnMode
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    covariance: List[List[float]]                   # annualized variance-covariance matrix
+    matrix: List[List[float]]                       # the matrix actually diagonalized
+    components: List[PCAComponent]
+    assets: List[PCAAssetRisk]
+    stats: PCAStats
+    warnings: List[str] = Field(default_factory=list)
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class PCARiskRequest(BaseModel):
+    tickers: List[str] = Field(min_length=2, max_length=100)
+    weights: Optional[List[float]] = None           # portfolio weights; default equal
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    return_mode: ReturnMode = "log"
+    matrix_type: PCAMatrixType = "covariance"
+    n_components: int = Field(default=10, ge=1, le=100)   # how many components to detail
+    top_loadings: int = Field(default=3, ge=1, le=10)     # tickers named per side in each PC
 
 
 class PortfolioHealthRequest(BaseModel):
@@ -3071,6 +3151,337 @@ def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest):
             min_weight=req.min_weight,
             optimization=req.optimization,
             seed=req.seed,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# PCA — eigen decomposition of the variance-covariance matrix
+# =========================
+#
+# The portfolio variance decomposes exactly over the eigenbasis of the covariance
+# matrix. With Sigma = V L V' (L diagonal, V orthonormal) and y = V'w:
+#
+#     sigma_p^2 = w' Sigma w = y' L y = sum_i lambda_i * y_i^2
+#
+# Each term is non-negative, so `lambda_i * y_i^2` is *the* contribution of
+# principal component i to the portfolio variance. A large eigenvalue only hurts
+# if the portfolio is actually exposed to that direction (y_i != 0) — which is
+# exactly what this endpoint separates.
+#
+# In "correlation" mode the matrix diagonalized is R (= D^-1 Sigma D^-1). Since
+# Sigma = D R D, using vol-scaled weights w~ = D w keeps the identity exact:
+#     sigma_p^2 = w~' R w~ = sum_i lambda_i * (v_i' w~)^2
+
+
+def _pc_sign_normalized(vec: np.ndarray) -> np.ndarray:
+    """Eigenvectors are sign-arbitrary. Orient so the dominant direction is positive,
+    which makes 'all loadings same sign' readable as a common market move."""
+    s = float(np.sum(vec))
+    if abs(s) > 1e-9:
+        return vec if s > 0 else -vec
+    # Balanced spread: anchor on the largest absolute loading instead.
+    k = int(np.argmax(np.abs(vec)))
+    return vec if vec[k] >= 0 else -vec
+
+
+def _pc_interpretation(
+    vec: np.ndarray,
+    explained_ratio: float,
+    contribution_pct: float,
+    top_pos: List[str],
+    top_neg: List[str],
+    index: int,
+) -> str:
+    n_pos = int(np.sum(vec > 1e-6))
+    n_neg = int(np.sum(vec < -1e-6))
+    dominant = top_pos or top_neg
+
+    if n_pos == 0 or n_neg == 0:
+        if index == 1:
+            base = ("Common market direction — every holding moves together. "
+                    "This is your undiversifiable core risk.")
+        elif dominant:
+            base = "Broad co-movement of " + ", ".join(dominant) + "."
+        else:
+            base = "Broad co-movement across the holdings."
+    else:
+        base = ("Spread: " + ", ".join(top_pos) + " up against " + ", ".join(top_neg) + " down. "
+                "A relative-value / rotation factor.")
+
+    if contribution_pct >= 0.5:
+        tail = f" Drives {contribution_pct * 100:.0f}% of your portfolio variance."
+    elif contribution_pct >= 0.15:
+        tail = f" Contributes {contribution_pct * 100:.0f}% of your portfolio variance."
+    elif explained_ratio >= 0.10 and contribution_pct < 0.05:
+        tail = (f" Present in the market ({explained_ratio * 100:.0f}% of matrix variance) but your "
+                f"weights barely touch it ({contribution_pct * 100:.1f}% of your variance) — "
+                f"a risk you are already netting out.")
+    else:
+        tail = f" Minor: {contribution_pct * 100:.1f}% of your portfolio variance."
+
+    return base + tail
+
+
+def _run_pca_risk(
+    tickers: List[str],
+    weights: Optional[List[float]],
+    lookback_period: str,
+    auto_adjust: bool,
+    return_mode: ReturnMode,
+    matrix_type: PCAMatrixType,
+    n_components: int,
+    top_loadings: int,
+) -> Dict[str, Any]:
+    if len(tickers) < 2:
+        raise ValueError("At least 2 tickers are required to run a PCA risk decomposition")
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    w_in: Optional[np.ndarray] = None
+    if weights is not None:
+        if len(weights) != len(tickers):
+            raise ValueError("weights length must match tickers length")
+        w_in = np.array(weights, dtype=float)
+        if np.any(w_in < 0):
+            raise ValueError("weights must be non-negative")
+        if w_in.sum() <= 0:
+            raise ValueError("sum of weights must be > 0")
+        w_in = w_in / w_in.sum()
+
+    cache_key = (
+        "pca",
+        tuple(tickers),
+        None if w_in is None else tuple(round(float(x), 6) for x in w_in.tolist()),
+        lookback_period,
+        auto_adjust,
+        return_mode,
+        matrix_type,
+        int(n_components),
+        int(top_loadings),
+        end_ts.date().isoformat(),
+    )
+    if cache_key in PCA_CACHE:
+        return PCA_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    available = [t for t in tickers if t in close.columns]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    if len(available) < 2:
+        raise ValueError("Need at least 2 tickers with price data to run a PCA")
+
+    # Re-align weights to the tickers that actually have data (renormalize); default equal.
+    if w_in is not None:
+        keep_mask = np.array([t in close.columns for t in tickers])
+        w_kept = w_in[keep_mask]
+        sk = w_kept.sum()
+        w = (w_kept / sk) if sk > 0 else np.full(len(available), 1.0 / len(available))
+    else:
+        w = np.full(len(available), 1.0 / len(available))
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 30:
+        raise ValueError("Not enough overlapping price observations (need >= 30)")
+
+    if return_mode == "log":
+        rets = np.log(prices / prices.shift(1)).dropna()
+    else:
+        rets = prices.pct_change().dropna()
+
+    if len(rets) < 20:
+        raise ValueError("Not enough return observations to run a PCA")
+
+    n = len(available)
+    warnings: List[str] = []
+    if len(rets) < n:
+        warnings.append(
+            f"Only {len(rets)} observations for {n} assets — the covariance matrix is singular, "
+            f"so the smallest eigenvalues are noise. Use a longer lookback."
+        )
+
+    ann_factor = 252.0
+    cov = rets.cov().to_numpy() * ann_factor                 # annualized variance-covariance
+    cov = (cov + cov.T) / 2.0                                # enforce exact symmetry
+    vols = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+
+    if matrix_type == "correlation":
+        safe_vols = np.where(vols > 1e-12, vols, 1.0)
+        d_inv = np.diag(1.0 / safe_vols)
+        target = d_inv @ cov @ d_inv
+        target = (target + target.T) / 2.0
+        np.fill_diagonal(target, 1.0)
+        w_eff = w * vols                                     # vol-scaled weights keep the identity exact
+    else:
+        target = cov
+        w_eff = w
+
+    # eigh: symmetric matrices -> real eigenvalues, orthonormal eigenvectors (ascending).
+    eigvals, eigvecs = np.linalg.eigh(target)
+    order = np.argsort(eigvals)[::-1]                        # descending: PC1 first
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+
+    # Tiny negatives are floating-point noise on a PSD matrix.
+    eigvals = np.where(np.abs(eigvals) < 1e-14, 0.0, eigvals)
+    if np.any(eigvals < 0):
+        warnings.append("Some eigenvalues are slightly negative (numerical noise); clipped to zero.")
+        eigvals = np.clip(eigvals, 0.0, None)
+
+    trace = float(np.sum(eigvals))
+    if trace <= 0:
+        raise ValueError("Degenerate covariance matrix (zero total variance)")
+
+    # Portfolio coordinates in the eigenbasis and the exact variance split.
+    exposures = eigvecs.T @ w_eff                            # y_i
+    contributions = eigvals * (exposures ** 2)               # lambda_i * y_i^2, all >= 0
+    port_var = float(np.sum(contributions))
+    port_vol = float(np.sqrt(max(port_var, 0.0)))
+    if port_var <= 0:
+        raise ValueError("Portfolio variance is zero — check weights and price data")
+
+    contrib_pct = contributions / port_var
+    explained = eigvals / trace
+    cum_explained = np.cumsum(explained)
+    cum_contrib = np.cumsum(contrib_pct)
+
+    def _first_index_reaching(cum: np.ndarray, threshold: float) -> int:
+        hits = np.nonzero(cum >= threshold)[0]
+        return int(hits[0]) + 1 if hits.size else int(cum.size)
+
+    # Effective number of bets (Meucci): entropy of the variance contributions.
+    p = contrib_pct[contrib_pct > 1e-12]
+    enb = float(np.exp(-np.sum(p * np.log(p)))) if p.size else 1.0
+
+    pos_eig = eigvals[eigvals > 1e-12]
+    condition_number = float(pos_eig[0] / pos_eig[-1]) if pos_eig.size >= 2 else 1.0
+
+    k = min(int(n_components), n)
+    components: List[Dict[str, Any]] = []
+    normalized_vecs: List[np.ndarray] = []
+    for i in range(n):
+        vec = _pc_sign_normalized(eigvecs[:, i].copy())
+        normalized_vecs.append(vec)
+
+    for i in range(k):
+        vec = normalized_vecs[i]
+        # Sign-normalizing the vector flips the exposure sign with it (y = v'w).
+        exposure = float(np.dot(vec, w_eff))
+
+        ranked = np.argsort(vec)[::-1]
+        top_pos = [available[j] for j in ranked[:top_loadings] if vec[j] > 1e-6]
+        top_neg = [available[j] for j in ranked[::-1][:top_loadings] if vec[j] < -1e-6]
+
+        components.append({
+            "index": i + 1,
+            "eigenvalue": float(eigvals[i]),
+            "factor_volatility": float(np.sqrt(max(eigvals[i], 0.0))),
+            "explained_variance_ratio": float(explained[i]),
+            "cumulative_explained": float(cum_explained[i]),
+            "portfolio_exposure": exposure,
+            "variance_contribution": float(contributions[i]),
+            "variance_contribution_pct": float(contrib_pct[i]),
+            "cumulative_variance_contribution_pct": float(cum_contrib[i]),
+            "risk_contribution": float(contributions[i] / port_vol),
+            "loadings": {available[j]: float(vec[j]) for j in range(n)},
+            "top_positive": top_pos,
+            "top_negative": top_neg,
+            "interpretation": _pc_interpretation(
+                vec=vec,
+                explained_ratio=float(explained[i]),
+                contribution_pct=float(contrib_pct[i]),
+                top_pos=top_pos,
+                top_neg=top_neg,
+                index=i + 1,
+            ),
+        })
+
+    # Classic per-asset risk attribution, as a cross-check on the eigen view.
+    sigma_w = cov @ w
+    mctr = sigma_w / port_vol
+    ctr = w * mctr                                           # sums to sigma_p
+    pc1 = normalized_vecs[0]
+    pc1_var_share = eigvals[0] * (pc1 ** 2)                  # PC1 variance carried by each asset
+    if matrix_type == "correlation":
+        # In correlation space each asset has unit variance.
+        denom = np.ones(n)
+    else:
+        denom = np.where(np.diag(cov) > 1e-18, np.diag(cov), 1.0)
+
+    loading_matrix = np.column_stack(normalized_vecs)        # n x n, columns = PCs
+    # Which PC carries most of each asset's variance: lambda_i * v_ij^2.
+    per_asset_pc_var = (loading_matrix ** 2) * eigvals[np.newaxis, :]
+    top_component = np.argmax(per_asset_pc_var, axis=1) + 1
+
+    assets: List[Dict[str, Any]] = []
+    for j, t in enumerate(available):
+        assets.append({
+            "ticker": t,
+            "weight": float(w[j]),
+            "volatility": float(vols[j]),
+            "marginal_contribution_to_risk": float(mctr[j]),
+            "contribution_to_risk": float(ctr[j]),
+            "contribution_to_risk_pct": float(ctr[j] / port_vol) if port_vol > 0 else 0.0,
+            "pc1_loading": float(pc1[j]),
+            "pc1_communality": float(min(1.0, max(0.0, pc1_var_share[j] / denom[j]))),
+            "top_component": int(top_component[j]),
+        })
+
+    weighted_avg_vol = float(np.dot(w, vols))
+    diversification_ratio = float(weighted_avg_vol / port_vol) if port_vol > 0 else 1.0
+
+    out = {
+        "tickers": available,
+        "weights": [float(x) for x in w.tolist()],
+        "matrix_type": matrix_type,
+        "return_mode": return_mode,
+        "observations": int(len(rets)),
+        "start_date_used": rets.index[0].date().isoformat(),
+        "end_date_used": rets.index[-1].date().isoformat(),
+        "covariance": [[float(v) for v in row] for row in cov],
+        "matrix": [[float(v) for v in row] for row in target],
+        "components": components,
+        "assets": assets,
+        "stats": {
+            "portfolio_volatility": port_vol,
+            "portfolio_variance": port_var,
+            "total_matrix_variance": trace,
+            "pc1_explained_ratio": float(explained[0]),
+            "pc1_variance_contribution_pct": float(contrib_pct[0]),
+            "n_components_for_80_matrix": _first_index_reaching(cum_explained, 0.80),
+            "n_components_for_90_matrix": _first_index_reaching(cum_explained, 0.90),
+            "n_components_for_90_portfolio_risk": _first_index_reaching(cum_contrib, 0.90),
+            "effective_number_of_bets": enb,
+            "max_contribution_pct": float(np.max(contrib_pct)),
+            "diversification_ratio": diversification_ratio,
+            "weighted_avg_volatility": weighted_avg_vol,
+            "condition_number": condition_number,
+        },
+        "warnings": warnings,
+        "errors": errors,
+    }
+    PCA_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/pca-risk", response_model=PCARiskResponse)
+def yahoo_pca_risk_post(req: PCARiskRequest):
+    try:
+        return _run_pca_risk(
+            tickers=req.tickers,
+            weights=req.weights,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            return_mode=req.return_mode,
+            matrix_type=req.matrix_type,
+            n_components=req.n_components,
+            top_loadings=req.top_loadings,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
