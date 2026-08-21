@@ -10,6 +10,8 @@ backend/input
 
 frontend/.env
 
+./notes.txt
+
 # Jupyter notebooks
 *.ipynb
 docs
