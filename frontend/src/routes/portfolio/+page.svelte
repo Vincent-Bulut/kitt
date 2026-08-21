@@ -592,6 +592,101 @@
     }
 
     // ---------------------------------------------------------------
+    // VaR / ES visualization — grouped bars per ticker (one bar per
+    // estimation method) at the selected confidence level, ES overlay.
+    // ---------------------------------------------------------------
+    let varSelectedLevel: number | null = null;
+
+    $: varLevels = Array.from(
+        new Set(riskRows.flatMap(r => r.points.map(p => p.confidence_level)))
+    ).sort((a, b) => a - b);
+
+    $: if (varLevels.length > 0 && (varSelectedLevel === null || !varLevels.includes(varSelectedLevel))) {
+        varSelectedLevel = varLevels[0];
+    }
+
+    const VAR_W = 960;
+    const VAR_H = 340;
+    const VAR_PAD = {top: 26, right: 24, bottom: 48, left: 64};
+    // Method colors validated for CVD separation on the dark chart surface
+    const VAR_COLORS: Record<string, string> = {
+        hist: "#2E8FB3",
+        gauss: "#B08E20",
+        cf: "#E0447A"
+    };
+
+    type VaRBar = {
+        key: "hist" | "gauss" | "cf";
+        label: string;
+        x: number;
+        w: number;
+        y: number;
+        h: number;
+        v: number;
+        es: number;
+        esLabel: string;
+    };
+
+    function getVaRChartData(rows: VaREsRow[], level: number | null) {
+        if (!rows || rows.length === 0 || level === null) return null;
+        const entries = rows
+            .map(r => ({ticker: r.ticker, pt: r.points.find(p => p.confidence_level === level)}))
+            .filter((e): e is { ticker: string; pt: VaREsPoint } => e.pt !== undefined);
+        if (entries.length === 0) return null;
+
+        const maxVal = Math.max(
+            ...entries.flatMap(e => [
+                e.pt.var_historical, e.pt.var_gaussian, e.pt.var_cornish_fisher, e.pt.es_historical
+            ])
+        );
+        const yMax = maxVal * 1.15 || 0.01;
+
+        const innerW = VAR_W - VAR_PAD.left - VAR_PAD.right;
+        const innerH = VAR_H - VAR_PAD.top - VAR_PAD.bottom;
+        const baseY = VAR_PAD.top + innerH;
+        const yAt = (v: number) => VAR_PAD.top + (1 - v / yMax) * innerH;
+
+        const n = entries.length;
+        const slot = innerW / n;
+        const barW = Math.min(26, (slot * 0.55) / 3);
+
+        const groups = entries.map((e, i) => {
+            const cx = VAR_PAD.left + slot * (i + 0.5);
+            const xs = [cx - 1.5 * barW - 2, cx - barW / 2, cx + barW / 2 + 2];
+            const defs: Array<[VaRBar["key"], string, number, number, string]> = [
+                ["hist", "Historical", e.pt.var_historical, e.pt.es_historical, "ES hist."],
+                ["gauss", "Gaussian", e.pt.var_gaussian, e.pt.es_gaussian, "ES Gauss"],
+                ["cf", "Cornish-Fisher", e.pt.var_cornish_fisher, e.pt.es_cf_empirical_tail, "ES CF tail"]
+            ];
+            const bars: VaRBar[] = defs.map(([key, label, v, es, esLabel], j) => ({
+                key, label,
+                x: xs[j],
+                w: barW,
+                y: yAt(v),
+                h: Math.max(0, baseY - yAt(v)),
+                v, es, esLabel
+            }));
+            return {
+                ticker: e.ticker,
+                cx,
+                bars,
+                es: e.pt.es_historical,
+                esY: yAt(e.pt.es_historical),
+                esX1: xs[0] - 5,
+                esX2: xs[2] + barW + 5
+            };
+        });
+
+        const yTicks: { value: number; y: number }[] = [];
+        for (let i = 0; i <= 5; i++) {
+            const v = (yMax * i) / 5;
+            yTicks.push({value: v, y: yAt(v)});
+        }
+
+        return {groups, yTicks, baseY};
+    }
+
+    // ---------------------------------------------------------------
     // Asset exclusion — symbols ignored by Portfolio Health, Portfolio
     // Optimization, Black-Litterman, Diversification Analysis, Risk
     // Decomposition and Monte Carlo. Weights are renormalized by the
@@ -1898,6 +1993,127 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- VALUE AT RISK — visual section -->
+                        <div class="sectionTitle">Value at Risk · VaR & Expected Shortfall (1-day)</div>
+                        {#if riskRows.length > 0 && varSelectedLevel !== null}
+                            {@const varData = getVaRChartData(riskRows, varSelectedLevel)}
+                            {#if varLevels.length > 1}
+                                <div class="varLevelSwitch">
+                                    <span class="label">Confidence</span>
+                                    {#each varLevels as lvl}
+                                        <button class="chipBtn mono" class:activeLevel={varSelectedLevel === lvl}
+                                                on:click={() => (varSelectedLevel = lvl)}>
+                                            {(lvl * 100).toFixed(0)}%
+                                        </button>
+                                    {/each}
+                                </div>
+                            {/if}
+
+                            {#if varData}
+                                <div class="mcChartWrap">
+                                    <div class="varLegendRow">
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{VAR_COLORS.hist}"></span>
+                                            <span class="mono soft xsmall">VaR Historical</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{VAR_COLORS.gauss}"></span>
+                                            <span class="mono soft xsmall">VaR Gaussian</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{VAR_COLORS.cf}"></span>
+                                            <span class="mono soft xsmall">VaR Cornish-Fisher</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varDash"></span>
+                                            <span class="mono soft xsmall">ES (historical)</span>
+                                        </span>
+                                        <span class="mono soft xsmall" style="margin-left:auto">
+                                            {((varSelectedLevel ?? 0) * 100).toFixed(0)}% confidence · daily loss
+                                        </span>
+                                    </div>
+                                    <svg class="mcChart" viewBox="0 0 {VAR_W} {VAR_H}" role="img"
+                                         aria-label="Daily Value at Risk by estimation method per asset at {((varSelectedLevel ?? 0) * 100).toFixed(0)}% confidence">
+                                        {#each varData.yTicks as tick}
+                                            <line x1={VAR_PAD.left} y1={tick.y} x2={VAR_W - VAR_PAD.right} y2={tick.y}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={VAR_PAD.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+
+                                        {#each varData.groups as g (g.ticker)}
+                                            {#each g.bars as b}
+                                                <rect x={b.x} y={b.y} width={b.w} height={b.h}
+                                                      fill={VAR_COLORS[b.key]}>
+                                                    <title>{g.ticker} · {b.label} VaR {formatPct(b.v)} · {b.esLabel} {formatPct(b.es)}</title>
+                                                </rect>
+                                            {/each}
+                                            <line x1={g.esX1} y1={g.esY} x2={g.esX2} y2={g.esY}
+                                                  stroke="rgba(255,255,255,0.85)" stroke-width="1.5"
+                                                  stroke-dasharray="4 3">
+                                                <title>{g.ticker} · ES historical {formatPct(g.es)}</title>
+                                            </line>
+                                            <text x={g.cx} y={varData.baseY + 16} fill="rgba(255,255,255,0.65)"
+                                                  font-size="11" text-anchor="middle" class="mono">{g.ticker}</text>
+                                        {/each}
+
+                                        <line x1={VAR_PAD.left} y1={varData.baseY} x2={VAR_W - VAR_PAD.right}
+                                              y2={varData.baseY} stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            <div class="tableWrap varTableGap">
+                                <table class="kittTable">
+                                    <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Conf.</th>
+                                        <th>VaR hist.</th>
+                                        <th>ES hist.</th>
+                                        <th>VaR Gauss</th>
+                                        <th>ES Gauss</th>
+                                        <th>VaR CF</th>
+                                        <th>ES CF tail</th>
+                                        <th>Obs.</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each riskRows as row (row.ticker)}
+                                        {#each row.points as pt, i}
+                                            <tr>
+                                                {#if i === 0}
+                                                    <td rowspan={row.points.length}><span
+                                                            class="mono">{row.ticker}</span></td>
+                                                {/if}
+                                                <td><span
+                                                        class="mono soft">{(pt.confidence_level * 100).toFixed(0)}%</span>
+                                                </td>
+                                                <td><span class="mono">{formatPct(pt.var_historical)}</span></td>
+                                                <td><span class="mono">{formatPct(pt.es_historical)}</span></td>
+                                                <td><span class="mono">{formatPct(pt.var_gaussian)}</span></td>
+                                                <td><span class="mono">{formatPct(pt.es_gaussian)}</span></td>
+                                                <td><span class="mono">{formatPct(pt.var_cornish_fisher)}</span></td>
+                                                <td><span class="mono">{formatPct(pt.es_cf_empirical_tail)}</span></td>
+                                                <td><span class="mono soft">{row.observations}</span></td>
+                                            </tr>
+                                        {/each}
+                                    {/each}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="mcFootnote soft">
+                                1-day loss estimates on daily arithmetic returns over the selected period
+                                ({selectedPeriod}) · VaR = loss threshold not exceeded at the given confidence ·
+                                ES = average loss beyond the VaR · enter several levels above (e.g. "0.95, 0.99")
+                                to compare confidence levels
+                            </div>
+                        {:else}
+                            <div class="emptyState">No VaR data available for the current positions.</div>
+                        {/if}
 
                         <div class="sectionTitle">Cumulative Returns Charts</div>
                         <div class="chartGrid">
@@ -4303,6 +4519,50 @@
     .excludeHint {
         font-size: 11px;
         margin: 4px 0 12px 0;
+    }
+
+    .varLevelSwitch {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin: 8px 0 12px 0;
+    }
+
+    .chipBtn.activeLevel {
+        background: linear-gradient(180deg, rgba(255, 0, 60, 0.35), rgba(255, 0, 60, 0.18));
+        border-color: rgba(255, 0, 60, 0.55);
+        color: rgba(255, 255, 255, 0.98);
+    }
+
+    .varLegendRow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+        margin: 0 0 10px 2px;
+    }
+
+    .varLegendItem {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .varSwatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        display: inline-block;
+    }
+
+    .varDash {
+        width: 16px;
+        border-top: 2px dashed rgba(255, 255, 255, 0.85);
+        display: inline-block;
+    }
+
+    .varTableGap {
+        margin-top: 14px;
     }
 
     .excludeChips {
