@@ -189,6 +189,70 @@
         points: VaREsPoint[];
     };
 
+    type PortfolioVaRContribution = {
+        ticker: string;
+        weight: number;
+        volatility: number;
+        standalone_var: number;
+        beta_to_portfolio: number;
+        marginal_var: number;
+        component_var: number;
+        component_var_pct: number;
+        component_es: number;
+        component_es_pct: number;
+    };
+
+    type PortfolioVaRPoint = {
+        confidence_level: number;
+        var_historical: number;
+        es_historical: number;
+        var_gaussian: number;
+        es_gaussian: number;
+        var_cornish_fisher: number;
+        es_cf_empirical_tail: number;
+        var_historical_value: number;
+        es_historical_value: number;
+        var_gaussian_value: number;
+        es_gaussian_value: number;
+        var_cornish_fisher_value: number;
+        es_cf_empirical_tail_value: number;
+        undiversified_var: number;
+        diversification_benefit: number;
+        diversification_benefit_pct: number;
+        gaussian_breaches: number;
+        gaussian_breach_rate: number;
+        expected_breach_rate: number;
+        contributions: PortfolioVaRContribution[];
+    };
+
+    type PortfolioVaRResult = {
+        tickers: string[];
+        weights: number[];
+        lookback_period: string;
+        return_mode: "arith" | "log";
+        horizon_days: number;
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        price_type: string;
+        portfolio_value: number | null;
+        stats: {
+            portfolio_volatility: number;
+            portfolio_volatility_annualized: number;
+            weighted_avg_volatility: number;
+            diversification_ratio: number;
+            mean_return: number;
+            skewness: number;
+            excess_kurtosis: number;
+            worst_return: number;
+            worst_return_date: string;
+            best_return: number;
+        };
+        points: PortfolioVaRPoint[];
+        warnings: string[];
+        errors: Record<string, string>;
+    };
+
     let mcResult: MonteCarloResult | null = null;
     let mcHorizonDays = 252;
     let mcNSimulations = 1000;
@@ -687,8 +751,8 @@
     }
 
     // ---------------------------------------------------------------
-    // Asset exclusion — symbols ignored by Portfolio Health, Portfolio
-    // Optimization, Black-Litterman, Diversification Analysis, Risk
+    // Asset exclusion — symbols ignored by Portfolio VaR, Portfolio Health,
+    // Portfolio Optimization, Black-Litterman, Diversification Analysis, Risk
     // Decomposition and Monte Carlo. Weights are renormalized by the
     // backend over the remaining tickers.
     // ---------------------------------------------------------------
@@ -1123,6 +1187,216 @@
         if (v >= 0.5) return "Acceptable";
         if (v >= 0) return "Poor";
         return "Negative";
+    }
+
+    // ---------------------------------------------------------------
+    // Portfolio VaR / ES — tail risk of the portfolio taken as a whole
+    // (weighted holdings, offsets included), not the per-asset figures
+    // in the analytics tab. Contributions decompose the portfolio loss
+    // back onto the holdings.
+    // ---------------------------------------------------------------
+    let portVarResult: PortfolioVaRResult | null = null;
+    let portVarLookback = "3Y";
+    let portVarLevelsInput = "0.95, 0.99";
+    let portVarHorizon = 1;
+    let isFetchingPortVar = false;
+    let portVarError = "";
+    let portVarSelectedLevel: number | null = null;
+
+    async function runPortfolioVaR() {
+        if (!positionView || positionView.rows.length === 0) {
+            portVarError = "No positions to analyze.";
+            portVarResult = null;
+            return;
+        }
+        const eligible = includedRows().filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length === 0) {
+            portVarError = excludedSymbols.length > 0
+                ? "No eligible positions left after exclusions."
+                : "No positions with a valid market weight.";
+            portVarResult = null;
+            return;
+        }
+
+        const levels = portVarLevelsInput
+            .split(",")
+            .map(s => Number(s.trim()))
+            .filter(v => Number.isFinite(v) && v > 0.5 && v < 1);
+        if (levels.length === 0) {
+            portVarError = "Enter at least one confidence level in (0.5, 1), e.g. \"0.95, 0.99\".";
+            return;
+        }
+
+        const marketValue = eligible.reduce((s, r) => s + (r.market_value ?? 0), 0);
+
+        isFetchingPortVar = true;
+        portVarError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                weights: eligible.map(r => r.weight as number),
+                lookback_period: portVarLookback,
+                auto_adjust: true,
+                confidence_levels: levels,
+                horizon_days: portVarHorizon,
+                portfolio_value: marketValue > 0 ? marketValue : null
+            };
+            const res = await instance.post<PortfolioVaRResult>("/analytics/yahoo/portfolio-var-es", payload);
+            portVarResult = res.data;
+            portVarSelectedLevel = null;
+        } catch (err: any) {
+            portVarError = err?.response?.data?.detail || err?.message || "Unable to compute the portfolio VaR.";
+            portVarResult = null;
+        } finally {
+            isFetchingPortVar = false;
+        }
+    }
+
+    $: portVarLevels = portVarResult ? portVarResult.points.map(p => p.confidence_level) : [];
+
+    $: if (portVarLevels.length > 0 &&
+        (portVarSelectedLevel === null || !portVarLevels.includes(portVarSelectedLevel))) {
+        portVarSelectedLevel = portVarLevels[portVarLevels.length - 1];
+    }
+
+    $: portVarPoint = portVarResult && portVarSelectedLevel !== null
+        ? portVarResult.points.find(p => p.confidence_level === portVarSelectedLevel) ?? null
+        : null;
+
+    function formatAmount(v: number | null | undefined) {
+        if (v === null || v === undefined || Number.isNaN(v)) return "—";
+        return v.toLocaleString(undefined, {maximumFractionDigits: 0});
+    }
+
+    function portVarHorizonLabel(days: number): string {
+        if (days === 1) return "1-day";
+        if (days === 5) return "1-week";
+        if (days === 21) return "1-month";
+        return `${days}-day`;
+    }
+
+    // Is the Gaussian number trustworthy? Compare realized breaches to the
+    // rate the normal assumption predicts.
+    function portVarTailClass(pt: PortfolioVaRPoint): string {
+        const ratio = pt.expected_breach_rate > 0 ? pt.gaussian_breach_rate / pt.expected_breach_rate : 1;
+        if (ratio > 1.5) return "redText";
+        if (ratio > 1.2) return "";
+        return "greenText";
+    }
+
+    function portVarTailVerdict(pt: PortfolioVaRPoint, r: PortfolioVaRResult): string {
+        const lvl = (pt.confidence_level * 100).toFixed(0);
+        const realized = (pt.gaussian_breach_rate * 100).toFixed(1);
+        const expected = (pt.expected_breach_rate * 100).toFixed(1);
+        const kurt = r.stats.excess_kurtosis;
+        const ratio = pt.expected_breach_rate > 0 ? pt.gaussian_breach_rate / pt.expected_breach_rate : 1;
+        if (ratio > 1.5) {
+            return `The Gaussian ${lvl}% VaR was broken on ${realized}% of the periods against ${expected}% expected `
+                + `(excess kurtosis ${kurt.toFixed(1)}): the normal assumption understates this portfolio's tail — `
+                + `size the risk off the historical or Cornish-Fisher figure.`;
+        }
+        if (ratio < 0.7) {
+            return `The Gaussian ${lvl}% VaR was broken on only ${realized}% of the periods against ${expected}% expected: `
+                + `it is conservative for this sample. The historical figure is the more realistic loss threshold.`;
+        }
+        return `The Gaussian ${lvl}% VaR was broken on ${realized}% of the periods against ${expected}% expected: `
+            + `the normal assumption holds up on this sample, and the three methods should agree closely.`;
+    }
+
+    // Chart A — the same loss measured three ways, horizontal bars, with the
+    // undiversified VaR (holdings never offsetting) as a reference line.
+    const PVAR_W = 960;
+    const PVAR_ROW_H = 44;
+    const PVAR_PAD = {top: 30, right: 130, bottom: 36, left: 128};
+    const PVAR_BAR_H = 18;
+
+    function getPortVarMethodChart(pt: PortfolioVaRPoint | null) {
+        if (!pt) return null;
+        const defs: Array<[VaRBar["key"], string, number, number, string]> = [
+            ["hist", "Historical", pt.var_historical, pt.es_historical, "ES hist."],
+            ["gauss", "Gaussian", pt.var_gaussian, pt.es_gaussian, "ES Gauss"],
+            ["cf", "Cornish-Fisher", pt.var_cornish_fisher, pt.es_cf_empirical_tail, "ES CF tail"]
+        ];
+        const maxVal = Math.max(pt.undiversified_var, ...defs.flatMap(([, , v, es]) => [v, es]));
+        const xMax = maxVal * 1.12 || 0.01;
+        const innerW = PVAR_W - PVAR_PAD.left - PVAR_PAD.right;
+        const height = PVAR_PAD.top + defs.length * PVAR_ROW_H + PVAR_PAD.bottom;
+        const xAt = (v: number) => PVAR_PAD.left + (v / xMax) * innerW;
+
+        const bars = defs.map(([key, label, v, es, esLabel], i) => {
+            const y = PVAR_PAD.top + i * PVAR_ROW_H;
+            return {
+                key, label, v, es, esLabel, y,
+                h: PVAR_BAR_H,
+                w: Math.max(1, xAt(v) - PVAR_PAD.left),
+                esX: xAt(es),
+                midY: y + PVAR_BAR_H / 2,
+                textY: y + PVAR_BAR_H / 2 + 4
+            };
+        });
+
+        const xTicks: { value: number; x: number }[] = [];
+        for (let i = 0; i <= 5; i++) {
+            const v = (xMax * i) / 5;
+            xTicks.push({value: v, x: xAt(v)});
+        }
+
+        return {
+            bars, xTicks, height,
+            x0: PVAR_PAD.left,
+            baseY: PVAR_PAD.top + defs.length * PVAR_ROW_H,
+            undivX: xAt(pt.undiversified_var)
+        };
+    }
+
+    // Chart B — where the portfolio loss comes from: each holding's share of the
+    // historical ES, against its weight. Above the weight marker = risk amplifier.
+    const PCONTRIB_ROW_H = 30;
+    const PCONTRIB_PAD = {top: 28, right: 96, bottom: 34, left: 128};
+    const PCONTRIB_BAR_H = 14;
+    const PCONTRIB_COLOR = "#2E8FB3";
+
+    function getPortVarContribChart(pt: PortfolioVaRPoint | null) {
+        if (!pt || pt.contributions.length === 0) return null;
+        const items = [...pt.contributions].sort((a, b) => b.component_es_pct - a.component_es_pct);
+        const vals = items.flatMap(c => [c.component_es_pct, c.weight]);
+        const lo = Math.min(0, ...vals);
+        const hi = Math.max(0.01, ...vals);
+        const span = hi - lo;
+        const xMin = lo < 0 ? lo - span * 0.08 : 0;
+        const xMax = hi + span * 0.12;
+        const innerW = PVAR_W - PCONTRIB_PAD.left - PCONTRIB_PAD.right;
+        const height = PCONTRIB_PAD.top + items.length * PCONTRIB_ROW_H + PCONTRIB_PAD.bottom;
+        const xAt = (v: number) => PCONTRIB_PAD.left + ((v - xMin) / (xMax - xMin)) * innerW;
+        const zeroX = xAt(0);
+
+        const rows = items.map((c, i) => {
+            const y = PCONTRIB_PAD.top + i * PCONTRIB_ROW_H;
+            const vx = xAt(c.component_es_pct);
+            return {
+                c, y,
+                h: PCONTRIB_BAR_H,
+                x: Math.min(zeroX, vx),
+                w: Math.max(1, Math.abs(vx - zeroX)),
+                weightX: xAt(c.weight),
+                midY: y + PCONTRIB_BAR_H / 2,
+                textY: y + PCONTRIB_BAR_H / 2 + 4,
+                amplifies: c.component_es_pct > c.weight
+            };
+        });
+
+        const xTicks: { value: number; x: number }[] = [];
+        for (let i = 0; i <= 5; i++) {
+            const v = xMin + ((xMax - xMin) * i) / 5;
+            xTicks.push({value: v, x: xAt(v)});
+        }
+
+        return {
+            rows, xTicks, height, zeroX,
+            baseY: PCONTRIB_PAD.top + items.length * PCONTRIB_ROW_H
+        };
     }
 
     async function runCorrelation() {
@@ -2228,8 +2502,9 @@
                         <div class="mcSection">
                             <div class="sectionTitle">Asset Filter · Calculation Universe</div>
                             <div class="excludeHint soft">
-                                Click a symbol to exclude it from Portfolio Health, Portfolio Optimization,
-                                Black-Litterman, Diversification Analysis, Risk Decomposition and Monte Carlo.
+                                Click a symbol to exclude it from Portfolio VaR, Portfolio Health, Portfolio
+                                Optimization, Black-Litterman, Diversification Analysis, Risk Decomposition and
+                                Monte Carlo.
                                 Weights are renormalized over the remaining assets — re-run a computation to apply.
                             </div>
                             <div class="excludeChips">
@@ -2351,6 +2626,351 @@
                         {:else if !isFetchingHealth}
                             <div class="emptyState">Click "Compute health" to assess your portfolio's risk-adjusted
                                 performance over the last {healthLookback}.
+                            </div>
+                        {/if}
+                    </div>
+
+                    <!-- PORTFOLIO VaR / ES -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Portfolio Value at Risk · VaR & ES of the Whole Portfolio</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={portVarLookback}>
+                                    <option value="6M">6 Months</option>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Horizon</span>
+                                <select class="input mono xsmallInput" bind:value={portVarHorizon}>
+                                    <option value={1}>1 day</option>
+                                    <option value={5}>1 week (5d)</option>
+                                    <option value={10}>10 days</option>
+                                    <option value={21}>1 month (21d)</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Confidence levels</span>
+                                <input class="input mono xsmallInput" type="text" placeholder="0.95, 0.99"
+                                       bind:value={portVarLevelsInput}/>
+                            </label>
+                            <button class="btn primary xsmall" on:click={runPortfolioVaR}
+                                    disabled={isFetchingPortVar || !positionView || positionView.rows.length === 0}>
+                                {isFetchingPortVar ? "Computing…" : "Compute portfolio VaR"}
+                            </button>
+                        </div>
+
+                        {#if portVarError}
+                            <div class="errorBox">{portVarError}</div>
+                        {/if}
+
+                        {#if portVarResult && portVarPoint}
+                            {#each portVarResult.warnings as w}
+                                <div class="mono soft xsmall">⚠ {w}</div>
+                            {/each}
+
+                            {#if portVarLevels.length > 1}
+                                <div class="varLevelSwitch">
+                                    <span class="label">Confidence</span>
+                                    {#each portVarLevels as lvl}
+                                        <button class="chipBtn mono" class:activeLevel={portVarSelectedLevel === lvl}
+                                                on:click={() => (portVarSelectedLevel = lvl)}>
+                                            {(lvl * 100).toFixed(0)}%
+                                        </button>
+                                    {/each}
+                                </div>
+                            {/if}
+
+                            <div class="healthHeadline">
+                                <div class="healthBigKpi">
+                                    <div class="healthBigLabel">
+                                        {portVarHorizonLabel(portVarResult.horizon_days)} VaR
+                                        · {(portVarPoint.confidence_level * 100).toFixed(0)}% historical
+                                    </div>
+                                    <div class="healthBigValue mono redText">
+                                        {#if portVarResult.portfolio_value}
+                                            {formatAmount(portVarPoint.var_historical_value)}
+                                        {:else}
+                                            {formatPct(portVarPoint.var_historical)}
+                                        {/if}
+                                    </div>
+                                    <div class="healthVerdict mono soft">
+                                        {formatPct(portVarPoint.var_historical)} of
+                                        {#if portVarResult.portfolio_value}
+                                            {formatAmount(portVarResult.portfolio_value)} invested
+                                        {:else}
+                                            portfolio value
+                                        {/if}
+                                    </div>
+                                </div>
+                                <div class="healthSubGrid">
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Expected shortfall (hist.)</div>
+                                        <div class="mcStatValue mono redText">{formatPct(portVarPoint.es_historical)}</div>
+                                        {#if portVarResult.portfolio_value}
+                                            <div class="mono soft xsmall">{formatAmount(portVarPoint.es_historical_value)}</div>
+                                        {/if}
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">VaR Gaussian</div>
+                                        <div class="mcStatValue mono">{formatPct(portVarPoint.var_gaussian)}</div>
+                                        {#if portVarResult.portfolio_value}
+                                            <div class="mono soft xsmall">{formatAmount(portVarPoint.var_gaussian_value)}</div>
+                                        {/if}
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">VaR Cornish-Fisher</div>
+                                        <div class="mcStatValue mono">{formatPct(portVarPoint.var_cornish_fisher)}</div>
+                                        {#if portVarResult.portfolio_value}
+                                            <div class="mono soft xsmall">{formatAmount(portVarPoint.var_cornish_fisher_value)}</div>
+                                        {/if}
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Undiversified VaR</div>
+                                        <div class="mcStatValue mono">{formatPct(portVarPoint.undiversified_var)}</div>
+                                        <div class="mono soft xsmall">sum of weighted single-asset VaR</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Diversification benefit</div>
+                                        <div class="mcStatValue mono greenText">
+                                            {formatPct(portVarPoint.diversification_benefit_pct)}
+                                        </div>
+                                        <div class="mono soft xsmall">
+                                            {formatPct(portVarPoint.undiversified_var)}
+                                            → {formatPct(portVarPoint.var_historical)} of portfolio value
+                                        </div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Gaussian VaR breaches</div>
+                                        <div class="mcStatValue mono {portVarTailClass(portVarPoint)}">
+                                            {formatPct(portVarPoint.gaussian_breach_rate)}
+                                        </div>
+                                        <div class="mono soft xsmall">
+                                            {portVarPoint.gaussian_breaches} periods · {formatPct(portVarPoint.expected_breach_rate)}
+                                            expected
+                                        </div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Ann. volatility</div>
+                                        <div class="mcStatValue mono">{formatPct(portVarResult.stats.portfolio_volatility_annualized)}</div>
+                                        <div class="mono soft xsmall">
+                                            div. ratio {formatNum(portVarResult.stats.diversification_ratio, 2)}
+                                        </div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Skew / excess kurtosis</div>
+                                        <div class="mcStatValue mono {portVarResult.stats.excess_kurtosis > 3 ? 'redText' : ''}">
+                                            {formatNum(portVarResult.stats.skewness, 2)}
+                                            / {formatNum(portVarResult.stats.excess_kurtosis, 1)}
+                                        </div>
+                                        <div class="mono soft xsmall">0 / 0 under normality</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Worst realized period</div>
+                                        <div class="mcStatValue mono redText">{formatPct(portVarResult.stats.worst_return)}</div>
+                                        <div class="mono soft xsmall">{portVarResult.stats.worst_return_date}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="pcaVerdict {portVarTailClass(portVarPoint)}">
+                                {portVarTailVerdict(portVarPoint, portVarResult)}
+                            </div>
+
+                            {@const pvm = getPortVarMethodChart(portVarPoint)}
+                            {#if pvm}
+                                <div class="mcChartWrap">
+                                    <div class="varLegendRow">
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{VAR_COLORS.hist}"></span>
+                                            <span class="mono soft xsmall">Historical</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{VAR_COLORS.gauss}"></span>
+                                            <span class="mono soft xsmall">Gaussian</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{VAR_COLORS.cf}"></span>
+                                            <span class="mono soft xsmall">Cornish-Fisher</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varDash"></span>
+                                            <span class="mono soft xsmall">Expected shortfall</span>
+                                        </span>
+                                        <span class="mono soft xsmall" style="margin-left:auto">
+                                            {portVarHorizonLabel(portVarResult.horizon_days)} portfolio loss
+                                            at {(portVarPoint.confidence_level * 100).toFixed(0)}%
+                                        </span>
+                                    </div>
+                                    <svg class="pvarChart" viewBox="0 0 {PVAR_W} {pvm.height}"
+                                         preserveAspectRatio="xMidYMid meet" role="img"
+                                         aria-label="Portfolio {portVarHorizonLabel(portVarResult.horizon_days)} Value at Risk by estimation method at {(portVarPoint.confidence_level * 100).toFixed(0)}% confidence">
+                                        {#each pvm.xTicks as tick}
+                                            <line x1={tick.x} y1={PVAR_PAD.top - 8} x2={tick.x} y2={pvm.baseY}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={tick.x} y={pvm.baseY + 16} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="middle" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+
+                                        <!-- Reference: what the loss would be with no offsetting between holdings -->
+                                        <line x1={pvm.undivX} y1={PVAR_PAD.top - 14} x2={pvm.undivX} y2={pvm.baseY}
+                                              stroke="rgba(255,255,255,0.30)" stroke-width="1.5"
+                                              stroke-dasharray="2 4"/>
+                                        <text x={pvm.undivX + 6} y={PVAR_PAD.top - 16} fill="rgba(255,255,255,0.45)"
+                                              font-size="10" text-anchor="start" class="mono">
+                                            undiversified {formatPct(portVarPoint.undiversified_var)}
+                                        </text>
+
+                                        {#each pvm.bars as b (b.key)}
+                                            <text x={PVAR_PAD.left - 12} y={b.textY} fill="rgba(255,255,255,0.65)"
+                                                  font-size="11" text-anchor="end" class="mono">{b.label}</text>
+                                            <rect x={pvm.x0} y={b.y} width={b.w} height={b.h} rx="3"
+                                                  fill={VAR_COLORS[b.key]}>
+                                                <title>{b.label} VaR {formatPct(b.v)} · {b.esLabel} {formatPct(b.es)}</title>
+                                            </rect>
+                                            <line x1={b.esX} y1={b.y - 4} x2={b.esX} y2={b.y + b.h + 4}
+                                                  stroke="rgba(255,255,255,0.85)" stroke-width="1.5"
+                                                  stroke-dasharray="4 3">
+                                                <title>{b.esLabel} {formatPct(b.es)}</title>
+                                            </line>
+                                            <text x={Math.max(b.esX, pvm.x0 + b.w) + 10} y={b.textY}
+                                                  fill="rgba(235,235,245,0.85)" font-size="11" text-anchor="start"
+                                                  class="mono">
+                                                {formatPct(b.v)} / {formatPct(b.es)}
+                                            </text>
+                                        {/each}
+
+                                        <line x1={pvm.x0} y1={PVAR_PAD.top - 14} x2={pvm.x0} y2={pvm.baseY}
+                                              stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            {@const pvc = getPortVarContribChart(portVarPoint)}
+                            {#if pvc}
+                                <div class="mcChartWrap varTableGap">
+                                    <div class="varLegendRow">
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{PCONTRIB_COLOR}"></span>
+                                            <span class="mono soft xsmall">Share of the portfolio ES</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varDash"></span>
+                                            <span class="mono soft xsmall">Portfolio weight</span>
+                                        </span>
+                                        <span class="mono soft xsmall" style="margin-left:auto">
+                                            bar past the marker = the holding carries more of the tail than its weight
+                                        </span>
+                                    </div>
+                                    <svg class="pvarChart" viewBox="0 0 {PVAR_W} {pvc.height}"
+                                         preserveAspectRatio="xMidYMid meet" role="img"
+                                         aria-label="Each holding's share of the portfolio expected shortfall against its weight">
+                                        {#each pvc.xTicks as tick}
+                                            <line x1={tick.x} y1={PCONTRIB_PAD.top - 8} x2={tick.x} y2={pvc.baseY}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={tick.x} y={pvc.baseY + 16} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="middle" class="mono">
+                                                {(tick.value * 100).toFixed(0)}%
+                                            </text>
+                                        {/each}
+
+                                        {#each pvc.rows as r (r.c.ticker)}
+                                            <text x={PCONTRIB_PAD.left - 12} y={r.textY} fill="rgba(255,255,255,0.65)"
+                                                  font-size="11" text-anchor="end" class="mono">{r.c.ticker}</text>
+                                            <rect x={r.x} y={r.y} width={r.w} height={r.h} rx="3"
+                                                  fill={PCONTRIB_COLOR} opacity={r.amplifies ? 1 : 0.6}>
+                                                <title>{r.c.ticker} · {formatPct(r.c.component_es_pct)} of the portfolio ES · weight {formatPct(r.c.weight)} · β {formatNum(r.c.beta_to_portfolio, 2)}</title>
+                                            </rect>
+                                            <line x1={r.weightX} y1={r.y - 3} x2={r.weightX} y2={r.y + r.h + 3}
+                                                  stroke="rgba(255,255,255,0.85)" stroke-width="1.5"
+                                                  stroke-dasharray="3 3">
+                                                <title>{r.c.ticker} weight {formatPct(r.c.weight)}</title>
+                                            </line>
+                                            <text x={Math.max(r.x + r.w, r.weightX) + 10} y={r.textY}
+                                                  fill="rgba(235,235,245,0.85)" font-size="11" text-anchor="start"
+                                                  class="mono">
+                                                {formatPct(r.c.component_es_pct)}
+                                            </text>
+                                        {/each}
+
+                                        <line x1={pvc.zeroX} y1={PCONTRIB_PAD.top - 8} x2={pvc.zeroX} y2={pvc.baseY}
+                                              stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            <div class="tableWrap varTableGap">
+                                <table class="kittTable">
+                                    <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Weight</th>
+                                        <th>Ann. vol</th>
+                                        <th>β to ptf</th>
+                                        <th>Standalone VaR</th>
+                                        <th>Marginal VaR</th>
+                                        <th>Component VaR</th>
+                                        <th>% of VaR</th>
+                                        <th>Component ES</th>
+                                        <th>% of ES</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each portVarPoint.contributions as c (c.ticker)}
+                                        <tr>
+                                            <td><span class="mono">{c.ticker}</span></td>
+                                            <td><span class="mono soft">{formatPct(c.weight)}</span></td>
+                                            <td><span class="mono">{formatPct(c.volatility)}</span></td>
+                                            <td><span class="mono">{formatNum(c.beta_to_portfolio, 2)}</span></td>
+                                            <td><span class="mono">{formatPct(c.standalone_var)}</span></td>
+                                            <td><span class="mono">{formatPct(c.marginal_var)}</span></td>
+                                            <td><span class="mono">{formatPct(c.component_var)}</span></td>
+                                            <td><span class="mono {c.component_var_pct > c.weight ? 'redText' : ''}">{formatPct(c.component_var_pct)}</span></td>
+                                            <td><span class="mono">{formatPct(c.component_es)}</span></td>
+                                            <td><span class="mono {c.component_es_pct > c.weight ? 'redText' : ''}">{formatPct(c.component_es_pct)}</span></td>
+                                        </tr>
+                                    {/each}
+                                    <tr>
+                                        <td><span class="mono bold">Portfolio</span></td>
+                                        <td><span class="mono soft">100.00%</span></td>
+                                        <td><span class="mono">{formatPct(portVarResult.stats.portfolio_volatility_annualized)}</span></td>
+                                        <td><span class="mono">1.00</span></td>
+                                        <td><span class="mono">{formatPct(portVarPoint.undiversified_var)}</span></td>
+                                        <td><span class="mono soft">—</span></td>
+                                        <td><span class="mono bold">{formatPct(portVarPoint.var_gaussian)}</span></td>
+                                        <td><span class="mono soft">100.00%</span></td>
+                                        <td><span class="mono bold">{formatPct(portVarPoint.es_historical)}</span></td>
+                                        <td><span class="mono soft">100.00%</span></td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="mcFootnote soft">
+                                {portVarResult.observations} {portVarHorizonLabel(portVarResult.horizon_days)}
+                                observations · {portVarResult.start_date_used} → {portVarResult.end_date_used}
+                                · {portVarResult.price_type} · arithmetic returns, weights held fixed over the horizon
+                                · component VaR uses the Gaussian decomposition and sums to the portfolio Gaussian VaR
+                                · component ES is the average loss of each holding on the tail periods and sums to the
+                                portfolio historical ES
+                                {#if excludedSymbols.length > 0}
+                                    · excluding {excludedSymbols.join(", ")}
+                                {/if}
+                                {#if Object.keys(portVarResult.errors).length > 0}
+                                    · skipped: {Object.keys(portVarResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingPortVar}
+                            <div class="emptyState">Click "Compute portfolio VaR" to measure the tail loss of the
+                                portfolio as a whole over the last {portVarLookback} — the per-asset VaR in the
+                                Analytics tab ignores how the holdings offset each other.
                             </div>
                         {/if}
                     </div>
@@ -4563,6 +5183,13 @@
 
     .varTableGap {
         margin-top: 14px;
+    }
+
+    /* Portfolio VaR charts grow with the number of holdings, so no height cap */
+    .pvarChart {
+        width: 100%;
+        height: auto;
+        display: block;
     }
 
     .excludeChips {

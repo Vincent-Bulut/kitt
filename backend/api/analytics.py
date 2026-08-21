@@ -59,6 +59,8 @@ BL_CACHE = TTLCache(maxsize=200, ttl=600)
 
 PCA_CACHE = TTLCache(maxsize=200, ttl=600)
 
+PORTVAR_CACHE = TTLCache(maxsize=500, ttl=600)
+
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
     "1Y": 365, "2Y": 730, "3Y": 1095,
@@ -582,6 +584,91 @@ class PCARiskRequest(BaseModel):
     matrix_type: PCAMatrixType = "covariance"
     n_components: int = Field(default=10, ge=1, le=100)   # how many components to detail
     top_loadings: int = Field(default=3, ge=1, le=10)     # tickers named per side in each PC
+
+
+class PortfolioVaRContribution(BaseModel):
+    ticker: str
+    weight: float
+    volatility: float                               # annualized standalone volatility
+    standalone_var: float                           # the asset's own historical VaR over the horizon
+    beta_to_portfolio: float                        # cov(r_i, r_p) / var(r_p)
+    marginal_var: float                             # dVaR_gaussian / dw_i
+    component_var: float                            # w_i * marginal_var (sums to var_gaussian)
+    component_var_pct: float                        # share of the portfolio Gaussian VaR
+    component_es: float                             # -w_i * mean(r_i | tail days) (sums to es_historical)
+    component_es_pct: float                         # share of the portfolio historical ES
+
+
+class PortfolioVaREsPoint(BaseModel):
+    confidence_level: float
+
+    # Portfolio-level losses, expressed as a positive fraction of portfolio value
+    var_historical: float
+    es_historical: float
+    var_gaussian: float
+    es_gaussian: float
+    var_cornish_fisher: float
+    es_cf_empirical_tail: float
+
+    # Same figures in portfolio currency (0.0 when no portfolio_value was supplied)
+    var_historical_value: float
+    es_historical_value: float
+    var_gaussian_value: float
+    es_gaussian_value: float
+    var_cornish_fisher_value: float
+    es_cf_empirical_tail_value: float
+
+    # Diversification: what the VaR would be if the holdings never offset each other
+    undiversified_var: float                        # sum(w_i * standalone historical VaR_i)
+    diversification_benefit: float                  # undiversified_var - var_historical
+    diversification_benefit_pct: float              # benefit / undiversified_var
+
+    # Normality check: how often the realized loss actually broke the Gaussian VaR
+    gaussian_breaches: int
+    gaussian_breach_rate: float
+    expected_breach_rate: float                     # 1 - confidence_level
+
+    contributions: List[PortfolioVaRContribution]
+
+
+class PortfolioVaREsStats(BaseModel):
+    portfolio_volatility: float                     # volatility of the horizon return
+    portfolio_volatility_annualized: float
+    weighted_avg_volatility: float                  # annualized sum(w_i * sigma_i)
+    diversification_ratio: float                    # weighted_avg_volatility / portfolio_volatility_annualized
+    mean_return: float                              # mean horizon return
+    skewness: float
+    excess_kurtosis: float
+    worst_return: float
+    worst_return_date: str
+    best_return: float
+
+
+class PortfolioVaREsResponse(BaseModel):
+    tickers: List[str]
+    weights: List[float]
+    lookback_period: str
+    return_mode: ReturnMode                         # always "arith" — VaR is a P&L of a linear position
+    horizon_days: int
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    price_type: str                                 # "Adjusted Close" or "Close"
+    portfolio_value: Optional[float] = None
+    stats: PortfolioVaREsStats
+    points: List[PortfolioVaREsPoint]
+    warnings: List[str] = Field(default_factory=list)
+    errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class PortfolioVaREsRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=100)
+    weights: Optional[List[float]] = None           # portfolio weights; default equal
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    confidence_levels: List[float] = Field(default_factory=lambda: [0.95, 0.99])
+    horizon_days: int = Field(default=1, ge=1, le=60)
+    portfolio_value: Optional[float] = Field(default=None, gt=0)
 
 
 class PortfolioHealthRequest(BaseModel):
@@ -3482,6 +3569,279 @@ def yahoo_pca_risk_post(req: PCARiskRequest):
             matrix_type=req.matrix_type,
             n_components=req.n_components,
             top_loadings=req.top_loadings,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# =========================
+# Portfolio VaR / ES
+# =========================
+
+def _overlapping_horizon_returns(rets: np.ndarray, horizon: int) -> np.ndarray:
+    """
+    Compound simple returns over rolling (overlapping) windows of `horizon` days.
+    rets shape (n, k) -> (n - horizon + 1, k). Weights are held fixed over each
+    window, so the portfolio horizon return stays exactly the weighted sum of the
+    asset horizon returns.
+    """
+    if horizon <= 1:
+        return rets
+    growth = np.cumprod(1.0 + rets, axis=0)
+    growth = np.vstack([np.ones((1, rets.shape[1])), growth])
+    return growth[horizon:] / growth[:-horizon] - 1.0
+
+
+def _run_portfolio_var_es(
+    tickers: List[str],
+    weights: Optional[List[float]],
+    lookback_period: str,
+    auto_adjust: bool,
+    confidence_levels: List[float],
+    horizon_days: int,
+    portfolio_value: Optional[float],
+) -> Dict[str, Any]:
+    if not tickers:
+        raise ValueError("At least one ticker is required")
+
+    horizon = int(horizon_days)
+    if horizon < 1:
+        raise ValueError("horizon_days must be >= 1")
+
+    cls: List[float] = []
+    for a in confidence_levels:
+        if not (0.5 < float(a) < 1.0):
+            raise ValueError("confidence_levels must be in (0.5, 1.0)")
+        cls.append(float(a))
+    if not cls:
+        raise ValueError("At least one confidence level is required")
+    cls = sorted(set(cls))
+
+    w_in: Optional[np.ndarray] = None
+    if weights is not None:
+        if len(weights) != len(tickers):
+            raise ValueError("weights length must match tickers length")
+        w_in = np.array(weights, dtype=float)
+        if np.any(w_in < 0):
+            raise ValueError("weights must be non-negative")
+        if w_in.sum() <= 0:
+            raise ValueError("sum of weights must be > 0")
+        w_in = w_in / w_in.sum()
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    cache_key = (
+        "portfolio_var_es",
+        tuple(tickers),
+        None if w_in is None else tuple(round(float(x), 6) for x in w_in.tolist()),
+        lookback_period,
+        auto_adjust,
+        tuple(cls),
+        horizon,
+        None if portfolio_value is None else round(float(portfolio_value), 2),
+        end_ts.date().isoformat(),
+    )
+    if cache_key in PORTVAR_CACHE:
+        return PORTVAR_CACHE[cache_key]
+
+    close = _download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+                              for t in tickers if t not in close.columns}
+    # Yahoo hands back an all-NaN column for a symbol it does not know: drop it instead
+    # of letting it wipe the overlapping window for every other holding.
+    available = []
+    for t in tickers:
+        if t not in close.columns:
+            continue
+        if close[t].dropna().empty:
+            errors[t] = "No price data returned for ticker"
+            continue
+        available.append(t)
+    if not available:
+        raise ValueError("No tickers available in downloaded data")
+
+    # Re-align weights to the tickers that actually have data (renormalize); default equal.
+    if w_in is not None:
+        keep_mask = np.array([t in available for t in tickers])
+        w_kept = w_in[keep_mask]
+        s_kept = w_kept.sum()
+        if s_kept <= 0:
+            raise ValueError("All weights map to missing tickers")
+        w = w_kept / s_kept
+    else:
+        w = np.full(len(available), 1.0 / len(available))
+
+    prices = close[available].dropna(how="any")
+    if len(prices) < 30:
+        raise ValueError("Not enough overlapping price observations (need >= 30)")
+
+    # VaR is the loss on a linear position, so arithmetic returns are the right space.
+    asset_rets = prices.pct_change().dropna(how="any")
+    if len(asset_rets) < 20:
+        raise ValueError("Not enough return observations to compute portfolio risk")
+
+    daily = asset_rets.to_numpy()
+    if len(daily) - horizon + 1 < 20:
+        raise ValueError(
+            f"Not enough observations for a {horizon}-day horizon "
+            f"({len(daily)} daily returns) — use a longer lookback"
+        )
+
+    horizon_rets = _overlapping_horizon_returns(daily, horizon)
+    horizon_index = asset_rets.index[horizon - 1:]
+    port = horizon_rets @ w                                  # exactly additive in the assets
+    port_series = pd.Series(port, index=horizon_index)
+
+    warnings: List[str] = []
+    n_obs = int(len(port))
+    if horizon > 1:
+        warnings.append(
+            f"Overlapping {horizon}-day windows: {n_obs} observations carry only "
+            f"~{max(1, n_obs // horizon)} independent ones, so the tail estimate is noisier "
+            f"than the observation count suggests."
+        )
+    for a in cls:
+        expected_tail = n_obs * (1.0 - a)
+        if expected_tail < 10:
+            warnings.append(
+                f"Only ~{expected_tail:.0f} observations sit beyond the "
+                f"{a * 100:.0f}% threshold — the historical VaR/ES at that level rests on very "
+                f"few points. Use a longer lookback or a lower confidence level."
+            )
+
+    # Annualized standalone / portfolio volatilities from the daily returns
+    ann_factor = 252.0
+    daily_vols = np.std(daily, axis=0, ddof=1)
+    vols_ann = daily_vols * np.sqrt(ann_factor)
+    port_daily = daily @ w
+    port_vol_ann = float(np.std(port_daily, ddof=1) * np.sqrt(ann_factor))
+    weighted_avg_vol = float(np.dot(w, vols_ann))
+    diversification_ratio = (weighted_avg_vol / port_vol_ann) if port_vol_ann > 0 else 0.0
+
+    # Covariance of the horizon returns: drives the Gaussian decomposition
+    cov_h = np.atleast_2d(np.cov(horizon_rets, rowvar=False, ddof=1))
+    cov_h = (cov_h + cov_h.T) / 2.0
+    mu_h = horizon_rets.mean(axis=0)
+    cov_w = cov_h @ w
+    port_var_h = float(w @ cov_w)
+    sigma_p = float(np.sqrt(max(port_var_h, 0.0)))
+
+    pv = float(portfolio_value) if portfolio_value else 0.0
+
+    points: List[Dict[str, Any]] = []
+    for alpha in cls:
+        summary = es_summary(port_series, [alpha])[0]
+
+        z = float(norm.ppf(1 - alpha))                       # negative (left tail)
+
+        # Historical tail days: the ES decomposition below sums exactly to es_historical
+        q = float(np.quantile(port, 1 - alpha))
+        tail_mask = port <= q
+        tail_means = (horizon_rets[tail_mask].mean(axis=0)
+                      if tail_mask.any() else np.zeros(len(available)))
+
+        es_hist = summary["es_historical"]
+        var_gauss = summary["var_gaussian"]
+
+        contributions: List[Dict[str, Any]] = []
+        undiversified = 0.0
+        for i, t in enumerate(available):
+            standalone = var_historical(pd.Series(horizon_rets[:, i]), alpha)
+            undiversified += float(w[i]) * standalone
+
+            if sigma_p > 0:
+                marginal = -float(mu_h[i]) - z * float(cov_w[i]) / sigma_p
+                beta = float(cov_w[i]) / port_var_h
+            else:
+                marginal = 0.0
+                beta = 0.0
+            component_var = float(w[i]) * marginal
+            component_es = -float(w[i]) * float(tail_means[i])
+
+            contributions.append({
+                "ticker": t,
+                "weight": float(w[i]),
+                "volatility": float(vols_ann[i]),
+                "standalone_var": standalone,
+                "beta_to_portfolio": beta,
+                "marginal_var": marginal,
+                "component_var": component_var,
+                "component_var_pct": (component_var / var_gauss) if var_gauss != 0 else 0.0,
+                "component_es": component_es,
+                "component_es_pct": (component_es / es_hist) if es_hist != 0 else 0.0,
+            })
+
+        var_hist = summary["var_historical"]
+        benefit = undiversified - var_hist
+
+        breaches = int(np.sum(port <= -var_gauss))
+
+        points.append({
+            "confidence_level": float(alpha),
+            **{k: float(v) for k, v in summary.items() if k != "confidence_level"},
+            "var_historical_value": var_hist * pv,
+            "es_historical_value": es_hist * pv,
+            "var_gaussian_value": var_gauss * pv,
+            "es_gaussian_value": summary["es_gaussian"] * pv,
+            "var_cornish_fisher_value": summary["var_cornish_fisher"] * pv,
+            "es_cf_empirical_tail_value": summary["es_cf_empirical_tail"] * pv,
+            "undiversified_var": undiversified,
+            "diversification_benefit": benefit,
+            "diversification_benefit_pct": (benefit / undiversified) if undiversified > 0 else 0.0,
+            "gaussian_breaches": breaches,
+            "gaussian_breach_rate": (breaches / n_obs) if n_obs else 0.0,
+            "expected_breach_rate": 1.0 - float(alpha),
+            "contributions": contributions,
+        })
+
+    worst_idx = int(np.argmin(port)) if n_obs else 0
+
+    out = {
+        "tickers": available,
+        "weights": w.tolist(),
+        "lookback_period": lookback_period,
+        "return_mode": "arith",
+        "horizon_days": horizon,
+        "observations": n_obs,
+        "start_date_used": horizon_index[0].date().isoformat(),
+        "end_date_used": horizon_index[-1].date().isoformat(),
+        "price_type": "Adjusted Close" if auto_adjust else "Close",
+        "portfolio_value": float(portfolio_value) if portfolio_value else None,
+        "stats": {
+            "portfolio_volatility": float(np.std(port, ddof=1)) if n_obs > 1 else 0.0,
+            "portfolio_volatility_annualized": port_vol_ann,
+            "weighted_avg_volatility": weighted_avg_vol,
+            "diversification_ratio": diversification_ratio,
+            "mean_return": float(np.mean(port)) if n_obs else 0.0,
+            "skewness": float(port_series.skew()) if n_obs > 2 else 0.0,
+            "excess_kurtosis": float(port_series.kurtosis()) if n_obs > 3 else 0.0,
+            "worst_return": float(port[worst_idx]) if n_obs else 0.0,
+            "worst_return_date": horizon_index[worst_idx].date().isoformat() if n_obs else "",
+            "best_return": float(np.max(port)) if n_obs else 0.0,
+        },
+        "points": points,
+        "warnings": warnings,
+        "errors": errors,
+    }
+    PORTVAR_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/portfolio-var-es", response_model=PortfolioVaREsResponse)
+def yahoo_portfolio_var_es_post(req: PortfolioVaREsRequest):
+    try:
+        return _run_portfolio_var_es(
+            tickers=req.tickers,
+            weights=req.weights,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            confidence_levels=req.confidence_levels,
+            horizon_days=req.horizon_days,
+            portfolio_value=req.portfolio_value,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
