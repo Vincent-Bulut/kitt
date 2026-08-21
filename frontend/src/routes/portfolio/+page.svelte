@@ -591,16 +591,46 @@
         loadAnalytics();
     }
 
+    // ---------------------------------------------------------------
+    // Asset exclusion — symbols ignored by Portfolio Health, Portfolio
+    // Optimization, Black-Litterman, Diversification Analysis, Risk
+    // Decomposition and Monte Carlo. Weights are renormalized by the
+    // backend over the remaining tickers.
+    // ---------------------------------------------------------------
+    let excludedSymbols: string[] = [];
+
+    function toggleExcludedSymbol(symbol: string) {
+        excludedSymbols = excludedSymbols.includes(symbol)
+            ? excludedSymbols.filter(s => s !== symbol)
+            : [...excludedSymbols, symbol];
+    }
+
+    function clearExcludedSymbols() {
+        excludedSymbols = [];
+    }
+
+    function includedRows(): PositionRow[] {
+        if (!positionView) return [];
+        return positionView.rows.filter(r => !excludedSymbols.includes(r.symbol));
+    }
+
+    // Exclusions are per-portfolio: reset them when switching portfolio
+    $: if (selectedPortfolioId !== null) {
+        excludedSymbols = [];
+    }
+
     async function runMonteCarlo() {
         if (!positionView || positionView.rows.length === 0) {
             mcError = "No positions to simulate.";
             return;
         }
-        const eligible = positionView.rows.filter(
+        const eligible = includedRows().filter(
             r => r.weight !== null && r.weight !== undefined && r.weight > 0
         );
         if (eligible.length === 0) {
-            mcError = "No positions with a valid market weight.";
+            mcError = excludedSymbols.length > 0
+                ? "No eligible positions left after exclusions."
+                : "No positions with a valid market weight.";
             return;
         }
         isFetchingMC = true;
@@ -613,7 +643,8 @@
                 n_simulations: mcNSimulations,
                 lookback_period: mcLookback,
                 auto_adjust: true,
-                initial_value: positionView.total_market_value || 1.0,
+                initial_value: eligible.reduce((s, r) => s + (r.market_value ?? 0), 0)
+                    || positionView.total_market_value || 1.0,
                 n_sample_paths: 30,
                 seed: 42
             };
@@ -719,11 +750,13 @@
             efResult = null;
             return;
         }
-        const eligible = positionView.rows.filter(
+        const eligible = includedRows().filter(
             r => r.weight !== null && r.weight !== undefined && r.weight > 0
         );
         if (eligible.length < 2) {
-            efError = "Need at least 2 positions with a valid market weight.";
+            efError = excludedSymbols.length > 0
+                ? "Need at least 2 eligible positions after exclusions."
+                : "Need at least 2 positions with a valid market weight.";
             efResult = null;
             return;
         }
@@ -820,7 +853,7 @@
 
     function blPortfolioTickers(): string[] {
         if (!positionView) return [];
-        return positionView.rows
+        return includedRows()
             .filter(r => r.weight !== null && r.weight !== undefined && r.weight > 0)
             .map(r => r.symbol);
     }
@@ -848,11 +881,13 @@
             blResult = null;
             return;
         }
-        const eligible = positionView.rows.filter(
+        const eligible = includedRows().filter(
             r => r.weight !== null && r.weight !== undefined && r.weight > 0
         );
         if (eligible.length < 2) {
-            blError = "Need at least 2 positions with a valid market weight.";
+            blError = excludedSymbols.length > 0
+                ? "Need at least 2 eligible positions after exclusions."
+                : "Need at least 2 positions with a valid market weight.";
             blResult = null;
             return;
         }
@@ -865,6 +900,10 @@
                 prior_weights: eligible.map(r => r.weight as number),
                 views: blViews
                     .filter(v => v.asset && (v.view_type === "absolute" || v.asset_other))
+                    .filter(v =>
+                        !excludedSymbols.includes(v.asset) &&
+                        (v.view_type === "absolute" || !excludedSymbols.includes(v.asset_other as string))
+                    )
                     .map(v => ({
                         view_type: v.view_type,
                         asset: v.asset,
@@ -947,11 +986,13 @@
             healthResult = null;
             return;
         }
-        const eligible = positionView.rows.filter(
+        const eligible = includedRows().filter(
             r => r.weight !== null && r.weight !== undefined && r.weight > 0
         );
         if (eligible.length === 0) {
-            healthError = "No positions with a valid market weight.";
+            healthError = excludedSymbols.length > 0
+                ? "No eligible positions left after exclusions."
+                : "No positions with a valid market weight.";
             healthResult = null;
             return;
         }
@@ -990,16 +1031,19 @@
     }
 
     async function runCorrelation() {
-        if (!positionView || positionView.rows.length < 2) {
-            corrError = "Need at least 2 positions to compute correlations.";
+        const rows = includedRows();
+        if (!positionView || rows.length < 2) {
+            corrError = excludedSymbols.length > 0
+                ? "Need at least 2 eligible positions after exclusions."
+                : "Need at least 2 positions to compute correlations.";
             corrResult = null;
             return;
         }
         isFetchingCorr = true;
         corrError = "";
         try {
-            const tickers = positionView.rows.map(r => r.symbol);
-            const weights = positionView.rows.map(r => r.weight ?? 0);
+            const tickers = rows.map(r => r.symbol);
+            const weights = rows.map(r => r.weight ?? 0);
             const hasWeights = weights.some(w => w > 0);
             const payload: Record<string, any> = {
                 tickers,
@@ -1051,11 +1095,13 @@
             pcaResult = null;
             return;
         }
-        const eligible = positionView.rows.filter(
+        const eligible = includedRows().filter(
             r => r.weight !== null && r.weight !== undefined && r.weight > 0
         );
         if (eligible.length < 2) {
-            pcaError = "Need at least 2 positions with a valid market weight.";
+            pcaError = excludedSymbols.length > 0
+                ? "Need at least 2 eligible positions after exclusions."
+                : "Need at least 2 positions with a valid market weight.";
             pcaResult = null;
             return;
         }
@@ -1959,6 +2005,44 @@
                                 </div>
                             {/if}
                         {/each}
+                    {/if}
+
+                    <!-- ASSET EXCLUSION FILTER -->
+                    {#if positionView && positionView.rows.length > 0}
+                        <div class="mcSection">
+                            <div class="sectionTitle">Asset Filter · Calculation Universe</div>
+                            <div class="excludeHint soft">
+                                Click a symbol to exclude it from Portfolio Health, Portfolio Optimization,
+                                Black-Litterman, Diversification Analysis, Risk Decomposition and Monte Carlo.
+                                Weights are renormalized over the remaining assets — re-run a computation to apply.
+                            </div>
+                            <div class="excludeChips">
+                                {#each positionView.rows as row (row.symbol)}
+                                    <button
+                                            class="chipBtn mono"
+                                            class:excluded={excludedSymbols.includes(row.symbol)}
+                                            aria-pressed={excludedSymbols.includes(row.symbol)}
+                                            title={excludedSymbols.includes(row.symbol)
+                                                ? `${row.symbol} is excluded — click to include`
+                                                : `${row.symbol} is included — click to exclude`}
+                                            on:click={() => toggleExcludedSymbol(row.symbol)}
+                                    >
+                                        {row.symbol}
+                                    </button>
+                                {/each}
+                                {#if excludedSymbols.length > 0}
+                                    <button class="btn ghost xsmall" on:click={clearExcludedSymbols}>
+                                        Reset ({excludedSymbols.length} excluded)
+                                    </button>
+                                {/if}
+                            </div>
+                            {#if excludedSymbols.length > 0}
+                                <div class="mcFootnote soft">
+                                    Excluded: <span class="mono">{excludedSymbols.join(", ")}</span>
+                                    · {positionView.rows.length - excludedSymbols.length} asset(s) in the calculation set
+                                </div>
+                            {/if}
+                        </div>
                     {/if}
 
                     <!-- PORTFOLIO HEALTH -->
@@ -4214,6 +4298,42 @@
     .mcFootnote {
         margin-top: 12px;
         font-size: 11px;
+    }
+
+    .excludeHint {
+        font-size: 11px;
+        margin: 4px 0 12px 0;
+    }
+
+    .excludeChips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+    }
+
+    .chipBtn {
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.04);
+        color: rgba(235, 235, 245, 0.9);
+        border-radius: 999px;
+        padding: 5px 12px;
+        font-size: 11px;
+        cursor: pointer;
+        transition: background 140ms ease, color 140ms ease, border-color 140ms ease, opacity 140ms ease;
+    }
+
+    .chipBtn:hover {
+        border-color: rgba(255, 0, 60, 0.5);
+    }
+
+    .chipBtn.excluded {
+        background: rgba(255, 0, 60, 0.12);
+        border-color: rgba(255, 0, 60, 0.55);
+        color: rgba(255, 255, 255, 0.5);
+        text-decoration: line-through;
+        opacity: 0.8;
     }
 
     .corrLayout {
