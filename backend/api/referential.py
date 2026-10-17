@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.api import schema
 from backend.api.database import get_db
-from backend.api.pea import scrape_pea_etfs, to_csv
+from backend.api.pea import scrape_pea_etfs, to_csv, find_new_isins
 
 router = APIRouter(prefix='/referential', tags=['REFERENTIAL'])
 
@@ -42,6 +42,35 @@ def download_pea_etfs():
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="pea.csv"'},
     )
+
+
+@router.get("/pea/new-isins")
+def check_new_pea_isins(db: Session = Depends(get_db)):
+    """
+    Scrapes the PEA-eligible ETFs on Euronext and returns those whose ISIN is not in the assets table.
+    """
+    try:
+        etfs = scrape_pea_etfs()
+    except (requests.RequestException, RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}")
+
+    try:
+        known_isins = {
+            isin.strip().upper()
+            for (isin,) in db.query(model.Assets.isin).all()
+            if isin
+        }
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    new_etfs = find_new_isins(etfs, known_isins)
+
+    return {
+        "scraped_isins": len({etf.isin for etf in etfs}),
+        "known_isins": len(known_isins),
+        "new_count": len(new_etfs),
+        "new_etfs": new_etfs,
+    }
 
 
 @router.get("/assets")

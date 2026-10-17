@@ -158,3 +158,24 @@ def to_csv(rows: list[PeaEtf]) -> str:
     writer.writeheader()
     writer.writerows(asdict(row) for row in rows)
     return buffer.getvalue()
+
+
+def find_new_isins(rows: list[PeaEtf], known_isins: set[str]) -> list[dict]:
+    """Return one entry per ISIN absent from ``known_isins``.
+
+    An ETF can be listed on several Euronext venues; its listings are merged
+    so each ISIN appears once, with all its symbols and markets.
+    """
+    by_isin: dict[str, dict] = {}
+    for etf in rows:
+        if etf.isin in known_isins:
+            continue
+        entry = by_isin.get(etf.isin)
+        if entry is None:
+            entry = by_isin[etf.isin] = {**asdict(etf), "symbols": [], "markets": []}
+        if etf.symbol and etf.symbol not in entry["symbols"]:
+            entry["symbols"].append(etf.symbol)
+        if etf.market and etf.market not in entry["markets"]:
+            entry["markets"].append(etf.market)
+
+    return sorted(by_isin.values(), key=lambda e: e["name"].lower())
