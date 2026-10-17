@@ -9,6 +9,7 @@
             <span class="dropdown-trigger">REFERENTIAL</span>
             <div class="dropdown-menu">
                 <a href="/referential/yahoo" class="dropdown-item">Yahoo-Finance</a>
+                <a href="/referential/pea" class="dropdown-item">PEA</a>
             </div>
         </div>
         <a href="/analytics" class="tab analytics-tab">ANALYTICS</a>

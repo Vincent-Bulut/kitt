@@ -1,7 +1,7 @@
 import os
 import requests
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from backend.api import schema, model
@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.api import schema
 from backend.api.database import get_db
+from backend.api.pea import scrape_pea_etfs, to_csv
 
 router = APIRouter(prefix='/referential', tags=['REFERENTIAL'])
 
@@ -24,6 +25,23 @@ ETFBOOK_API_BASE_URL = os.getenv("ETFBOOK_API_BASE_URL")
 @router.get("/")
 def say_hello():
     return "Hello Referential!"
+
+
+@router.get("/pea/download")
+def download_pea_etfs():
+    """
+    Scrapes the PEA-eligible ETFs listed on Euronext and returns them as a CSV file.
+    """
+    try:
+        etfs = scrape_pea_etfs()
+    except (requests.RequestException, RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}")
+
+    return Response(
+        content=to_csv(etfs).encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="pea.csv"'},
+    )
 
 
 @router.get("/assets")
