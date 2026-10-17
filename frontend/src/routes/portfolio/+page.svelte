@@ -394,6 +394,76 @@
     let isFetchingHealth = false;
     let healthError = "";
 
+    type RegressionStats = {
+        r_squared: number;
+        adj_r_squared: number;
+        correlation: number;
+        beta: number;
+        beta_std_err: number;
+        beta_t_stat: number;
+        alpha: number;
+        alpha_annualized: number;
+        alpha_t_stat: number;
+        alpha_p_value: number;
+        total_volatility: number;
+        systematic_volatility: number;
+        idiosyncratic_volatility: number;
+        benchmark_volatility: number;
+        tracking_error: number;
+        information_ratio: number;
+        portfolio_return_annualized: number;
+        benchmark_return_annualized: number;
+    };
+
+    type RegressionPoint = { date: string; benchmark_return: number; portfolio_return: number };
+    type RollingR2Point = { date: string; r_squared: number; beta: number };
+
+    type AssetRegression = {
+        ticker: string;
+        weight: number;
+        beta: number;
+        r_squared: number;
+        correlation: number;
+        beta_contribution: number;
+    };
+
+    type PortfolioRegressionResult = {
+        tickers: string[];
+        weights: number[];
+        benchmark: string;
+        frequency: "daily" | "weekly";
+        lookback_period: string;
+        base_currency: string;
+        currencies: Record<string, string>;
+        observations: number;
+        start_date_used: string;
+        end_date_used: string;
+        rolling_window: number;
+        stats: RegressionStats;
+        points: RegressionPoint[];
+        rolling: RollingR2Point[];
+        assets: AssetRegression[];
+        warnings: string[];
+        errors: Record<string, string>;
+    };
+
+    const REG_BENCHMARKS = [
+        {symbol: "CW8.PA", label: "Amundi MSCI World (EUR)"},
+        {symbol: "IWDA.AS", label: "iShares Core MSCI World"},
+        {symbol: "EXSA.DE", label: "iShares STOXX Europe 600"},
+        {symbol: "^STOXX50E", label: "Euro Stoxx 50"},
+        {symbol: "^FCHI", label: "CAC 40"},
+        {symbol: "SPY", label: "S&P 500 (USD)"}
+    ];
+
+    let regResult: PortfolioRegressionResult | null = null;
+    let regBenchmark = "CW8.PA";
+    let regLookback = "3Y";
+    let regFrequency: "daily" | "weekly" = "daily";
+    let regCurrency = "EUR";
+    let isFetchingReg = false;
+    let regError = "";
+
     type FrontierPoint = {
         expected_return: number;
         volatility: number;
@@ -1187,6 +1257,183 @@
         if (v >= 0.5) return "Acceptable";
         if (v >= 0) return "Poor";
         return "Negative";
+    }
+
+    // ---------------------------------------------------------------
+    // Portfolio regression — OLS of the portfolio returns on a benchmark.
+    // R² is the share of the portfolio variance the benchmark explains;
+    // the rest (1 - R²) is idiosyncratic risk.
+    // ---------------------------------------------------------------
+    async function runPortfolioRegression() {
+        if (!positionView || positionView.rows.length === 0) {
+            regError = "No positions to analyze.";
+            regResult = null;
+            return;
+        }
+        const eligible = includedRows().filter(
+            r => r.weight !== null && r.weight !== undefined && r.weight > 0
+        );
+        if (eligible.length === 0) {
+            regError = excludedSymbols.length > 0
+                ? "No eligible positions left after exclusions."
+                : "No positions with a valid market weight.";
+            regResult = null;
+            return;
+        }
+        const benchmark = regBenchmark.trim();
+        if (!benchmark) {
+            regError = "Enter a benchmark ticker.";
+            return;
+        }
+        isFetchingReg = true;
+        regError = "";
+        try {
+            const payload = {
+                tickers: eligible.map(r => r.symbol),
+                weights: eligible.map(r => r.weight as number),
+                benchmark,
+                lookback_period: regLookback,
+                auto_adjust: true,
+                frequency: regFrequency,
+                base_currency: regCurrency
+            };
+            const res = await instance.post<PortfolioRegressionResult>("/analytics/yahoo/portfolio-regression", payload);
+            regResult = res.data;
+        } catch (err: any) {
+            regError = err?.response?.data?.detail || err?.message || "Unable to run the portfolio regression.";
+            regResult = null;
+        } finally {
+            isFetchingReg = false;
+        }
+    }
+
+    // Series whose quote currency differs from the base one, e.g. "^NDX USD"
+    function regConvertedSeries(r: PortfolioRegressionResult): string[] {
+        return Object.entries(r.currencies)
+            .filter(([, ccy]) => ccy.toUpperCase() !== r.base_currency)
+            .map(([ticker, ccy]) => `${ticker} ${ccy}`);
+    }
+
+    function r2Verdict(r: PortfolioRegressionResult): string {
+        const s = r.stats;
+        const pct = Math.round(s.r_squared * 100);
+        let head: string;
+        if (s.r_squared >= 0.9) {
+            head = `Index-like: ${r.benchmark} explains ${pct}% of the portfolio's variance. The portfolio moves `
+                + `almost one-for-one with the benchmark — active risk is small (tracking error ${formatPct(s.tracking_error)}).`;
+        } else if (s.r_squared >= 0.7) {
+            head = `Strongly benchmark-driven: ${pct}% of the variance comes from ${r.benchmark}. Beta `
+                + `(${s.beta.toFixed(2)}) is a reliable summary of the market exposure.`;
+        } else if (s.r_squared >= 0.4) {
+            head = `Partly benchmark-driven: ${r.benchmark} explains ${pct}% of the variance, the remaining `
+                + `${100 - pct}% is specific to the holdings. Read beta as an average, not a hedge ratio.`;
+        } else {
+            head = `Largely independent of ${r.benchmark}: only ${pct}% of the variance is explained. Beta and alpha `
+                + `say little here — try a benchmark closer to what the portfolio holds.`;
+        }
+        const alphaTxt = s.alpha_p_value < 0.05
+            ? ` Alpha of ${formatPct(s.alpha_annualized)} a year is statistically significant (p = ${s.alpha_p_value.toFixed(3)}).`
+            : ` Alpha (${formatPct(s.alpha_annualized)} a year) is not statistically different from zero (p = ${s.alpha_p_value.toFixed(2)}).`;
+        return head + alphaTxt;
+    }
+
+    const REG_W = 960;
+    const REG_COLORS = {points: "#2E8FB3", fit: "#E0447A", beta: "#B08E20"};
+
+    // Round tick steps (1 / 2 / 5 × 10^k) so the grid lands on readable values and on 0
+    function regNiceTicks(lo: number, hi: number, at: (v: number) => number) {
+        const raw = (hi - lo) / 5;
+        const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+        const step = [1, 2, 5, 10].map(m => m * mag).find(st => st >= raw) ?? raw;
+        const out: { value: number; pos: number }[] = [];
+        for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) {
+            out.push({value: v, pos: at(v)});
+        }
+        return out;
+    }
+
+    // Chart A — scatter of period returns with the fitted line and the beta = 1 reference
+    const REG_SCATTER_H = 420;
+    const REG_SCATTER_PAD = {top: 20, right: 24, bottom: 44, left: 64};
+
+    function getRegScatter(r: PortfolioRegressionResult | null) {
+        if (!r || r.points.length === 0) return null;
+        const xs = r.points.map(p => p.benchmark_return);
+        const ys = r.points.map(p => p.portfolio_return);
+        const pad = (lo: number, hi: number) => {
+            const span = hi - lo || 0.01;
+            return [lo - span * 0.06, hi + span * 0.06];
+        };
+        const [xMin, xMax] = pad(Math.min(...xs), Math.max(...xs));
+        const [yMin, yMax] = pad(Math.min(...ys), Math.max(...ys));
+        const innerW = REG_W - REG_SCATTER_PAD.left - REG_SCATTER_PAD.right;
+        const innerH = REG_SCATTER_H - REG_SCATTER_PAD.top - REG_SCATTER_PAD.bottom;
+        const xAt = (v: number) => REG_SCATTER_PAD.left + ((v - xMin) / (xMax - xMin)) * innerW;
+        const yAt = (v: number) => REG_SCATTER_PAD.top + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+
+        const dots = r.points.map(p => ({
+            x: xAt(p.benchmark_return),
+            y: yAt(p.portfolio_return),
+            p
+        }));
+
+        const lineAt = (slope: number, intercept: number) => ({
+            x1: xAt(xMin), y1: yAt(intercept + slope * xMin),
+            x2: xAt(xMax), y2: yAt(intercept + slope * xMax)
+        });
+
+        return {
+            dots,
+            fit: lineAt(r.stats.beta, r.stats.alpha),
+            identity: lineAt(1, 0),
+            xTicks: regNiceTicks(xMin, xMax, xAt),
+            yTicks: regNiceTicks(yMin, yMax, yAt),
+            zeroX: xAt(0),
+            zeroY: yAt(0),
+            clip: {x: REG_SCATTER_PAD.left, y: REG_SCATTER_PAD.top, w: innerW, h: innerH},
+            baseY: REG_SCATTER_PAD.top + innerH
+        };
+    }
+
+    // Chart B — rolling R² (left axis, 0–1) and rolling beta (right axis)
+    const REG_ROLL_H = 300;
+    const REG_ROLL_PAD = {top: 20, right: 64, bottom: 40, left: 64};
+
+    function getRegRolling(r: PortfolioRegressionResult | null) {
+        if (!r || r.rolling.length < 2) return null;
+        const pts = r.rolling;
+        const n = pts.length;
+        const innerW = REG_W - REG_ROLL_PAD.left - REG_ROLL_PAD.right;
+        const innerH = REG_ROLL_H - REG_ROLL_PAD.top - REG_ROLL_PAD.bottom;
+        const xAt = (i: number) => REG_ROLL_PAD.left + (i / (n - 1)) * innerW;
+        const yR2 = (v: number) => REG_ROLL_PAD.top + (1 - v) * innerH;
+
+        const betas = pts.map(p => p.beta);
+        let bMin = Math.min(0, ...betas, r.stats.beta);
+        let bMax = Math.max(1.2, ...betas, r.stats.beta);
+        const bSpan = bMax - bMin;
+        bMin -= bSpan * 0.05;
+        bMax += bSpan * 0.05;
+        const yBeta = (v: number) => REG_ROLL_PAD.top + (1 - (v - bMin) / (bMax - bMin)) * innerH;
+
+        const path = (f: (p: RollingR2Point) => number) =>
+            pts.map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(1)},${f(p).toFixed(1)}`).join(" ");
+
+        const r2Ticks = Array.from({length: 6}, (_, i) => ({value: i / 5, y: yR2(i / 5)}));
+        const betaTicks = regNiceTicks(bMin, bMax, yBeta).map(t => ({value: t.value, y: t.pos}));
+        const step = Math.max(1, Math.floor(n / 6));
+        const xTicks: { label: string; x: number }[] = [];
+        for (let i = 0; i < n; i += step) xTicks.push({label: pts[i].date, x: xAt(i)});
+
+        return {
+            r2Path: path(p => yR2(p.r_squared)),
+            betaPath: path(p => yBeta(p.beta)),
+            fullR2Y: yR2(r.stats.r_squared),
+            r2Ticks, betaTicks, xTicks,
+            x0: REG_ROLL_PAD.left,
+            x1: REG_ROLL_PAD.left + innerW,
+            baseY: REG_ROLL_PAD.top + innerH
+        };
     }
 
     // ---------------------------------------------------------------
@@ -2626,6 +2873,308 @@
                         {:else if !isFetchingHealth}
                             <div class="emptyState">Click "Compute health" to assess your portfolio's risk-adjusted
                                 performance over the last {healthLookback}.
+                            </div>
+                        {/if}
+                    </div>
+
+                    <!-- PORTFOLIO REGRESSION / R² -->
+                    <div class="mcSection">
+                        <div class="sectionTitle">Portfolio Regression · R² vs Benchmark</div>
+                        <div class="mcControls">
+                            <label class="field inlineField">
+                                <span class="label">Benchmark</span>
+                                <input class="input mono xsmallInput" list="regBenchmarks" bind:value={regBenchmark}
+                                       placeholder="CW8.PA"/>
+                                <datalist id="regBenchmarks">
+                                    {#each REG_BENCHMARKS as b}
+                                        <option value={b.symbol}>{b.label}</option>
+                                    {/each}
+                                </datalist>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Lookback</span>
+                                <select class="input mono xsmallInput" bind:value={regLookback}>
+                                    <option value="1Y">1 Year</option>
+                                    <option value="2Y">2 Years</option>
+                                    <option value="3Y">3 Years</option>
+                                    <option value="5Y">5 Years</option>
+                                    <option value="10Y">10 Years</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Returns</span>
+                                <select class="input mono xsmallInput" bind:value={regFrequency}>
+                                    <option value="daily">Daily</option>
+                                    <option value="weekly">Weekly</option>
+                                </select>
+                            </label>
+                            <label class="field inlineField">
+                                <span class="label">Currency</span>
+                                <select class="input mono xsmallInput" bind:value={regCurrency}>
+                                    <option value="EUR">EUR</option>
+                                    <option value="USD">USD</option>
+                                    <option value="GBP">GBP</option>
+                                    <option value="CHF">CHF</option>
+                                </select>
+                            </label>
+                            <button class="btn primary xsmall" on:click={runPortfolioRegression}
+                                    disabled={isFetchingReg || !positionView || positionView.rows.length === 0}>
+                                {isFetchingReg ? "Computing…" : "Run regression"}
+                            </button>
+                        </div>
+
+                        {#if regError}
+                            <div class="errorBox">{regError}</div>
+                        {/if}
+
+                        {#if regResult}
+                            {@const rs = regResult.stats}
+                            <div class="healthHeadline">
+                                <div class="healthBigKpi">
+                                    <div class="healthBigLabel">R² vs {regResult.benchmark}</div>
+                                    <div class="healthBigValue mono">{rs.r_squared.toFixed(2)}</div>
+                                    <div class="healthVerdict mono soft">adj. {rs.adj_r_squared.toFixed(3)}</div>
+                                </div>
+                                <div class="healthSubGrid">
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Beta</div>
+                                        <div class="mcStatValue mono">{rs.beta.toFixed(2)}</div>
+                                        <div class="mono soft xsmall">± {rs.beta_std_err.toFixed(3)} (t = {rs.beta_t_stat.toFixed(1)})</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Alpha (ann.)</div>
+                                        <div class="mcStatValue mono {rs.alpha_p_value < 0.05 ? pnlClass(rs.alpha_annualized) : ''}">{formatPct(rs.alpha_annualized)}</div>
+                                        <div class="mono soft xsmall">t = {rs.alpha_t_stat.toFixed(2)} · p = {rs.alpha_p_value.toFixed(2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Correlation</div>
+                                        <div class="mcStatValue mono">{rs.correlation.toFixed(2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Tracking error</div>
+                                        <div class="mcStatValue mono">{formatPct(rs.tracking_error)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Information ratio</div>
+                                        <div class="mcStatValue mono {pnlClass(rs.information_ratio)}">{rs.information_ratio.toFixed(2)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Ann. return ptf / bench</div>
+                                        <div class="mcStatValue mono">
+                                            <span class={pnlClass(rs.portfolio_return_annualized)}>{formatPct(rs.portfolio_return_annualized)}</span>
+                                            <span class="soft">/</span>
+                                            <span class={pnlClass(rs.benchmark_return_annualized)}>{formatPct(rs.benchmark_return_annualized)}</span>
+                                        </div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Total volatility</div>
+                                        <div class="mcStatValue mono">{formatPct(rs.total_volatility)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Systematic vol</div>
+                                        <div class="mcStatValue mono">{formatPct(rs.systematic_volatility)}</div>
+                                        <div class="mono soft xsmall">|β| × bench vol {formatPct(rs.benchmark_volatility)}</div>
+                                    </div>
+                                    <div class="mcStat">
+                                        <div class="mcStatLabel">Idiosyncratic vol</div>
+                                        <div class="mcStatValue mono">{formatPct(rs.idiosyncratic_volatility)}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="regSplit" role="img"
+                                 aria-label="Variance split: {(rs.r_squared * 100).toFixed(0)}% systematic, {((1 - rs.r_squared) * 100).toFixed(0)}% idiosyncratic">
+                                <div class="regSplitSys" style="width:{Math.max(0, Math.min(1, rs.r_squared)) * 100}%">
+                                    <span class="mono xsmall">systematic {(rs.r_squared * 100).toFixed(1)}%</span>
+                                </div>
+                                <div class="regSplitIdio">
+                                    <span class="mono xsmall">idiosyncratic {((1 - rs.r_squared) * 100).toFixed(1)}%</span>
+                                </div>
+                            </div>
+
+                            <div class="pcaVerdict">{r2Verdict(regResult)}</div>
+
+                            {#if regResult.warnings.length > 0}
+                                <div class="errorBox">{regResult.warnings.join(" · ")}</div>
+                            {/if}
+
+                            {@const sc = getRegScatter(regResult)}
+                            {#if sc}
+                                <div class="mcChartWrap">
+                                    <div class="varLegendRow">
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{REG_COLORS.points}"></span>
+                                            <span class="mono soft xsmall">{regResult.frequency === "daily" ? "Daily" : "Weekly"} returns</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{REG_COLORS.fit}"></span>
+                                            <span class="mono soft xsmall">Fit: ptf = {formatPct(rs.alpha)} + {rs.beta.toFixed(2)} × bench</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varDash"></span>
+                                            <span class="mono soft xsmall">β = 1</span>
+                                        </span>
+                                    </div>
+                                    <svg class="pvarChart" viewBox="0 0 {REG_W} {REG_SCATTER_H}"
+                                         preserveAspectRatio="xMidYMid meet" role="img"
+                                         aria-label="Scatter of portfolio returns against {regResult.benchmark} returns with the fitted regression line">
+                                        <defs>
+                                            <clipPath id="regScatterClip">
+                                                <rect x={sc.clip.x} y={sc.clip.y} width={sc.clip.w} height={sc.clip.h}/>
+                                            </clipPath>
+                                        </defs>
+                                        {#each sc.xTicks as tick}
+                                            <line x1={tick.pos} y1={sc.clip.y} x2={tick.pos} y2={sc.baseY}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={tick.pos} y={sc.baseY + 16} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="middle" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+                                        {#each sc.yTicks as tick}
+                                            <line x1={sc.clip.x} y1={tick.pos} x2={sc.clip.x + sc.clip.w} y2={tick.pos}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={sc.clip.x - 8} y={tick.pos + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">
+                                                {(tick.value * 100).toFixed(1)}%
+                                            </text>
+                                        {/each}
+                                        <text x={sc.clip.x + sc.clip.w / 2} y={REG_SCATTER_H - 4}
+                                              fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="middle"
+                                              class="mono">{regResult.benchmark} return</text>
+                                        <text x={14} y={sc.clip.y + sc.clip.h / 2} fill="rgba(255,255,255,0.55)"
+                                              font-size="11" text-anchor="middle" class="mono"
+                                              transform="rotate(-90 14 {sc.clip.y + sc.clip.h / 2})">Portfolio return</text>
+
+                                        <g clip-path="url(#regScatterClip)">
+                                            <line x1={sc.zeroX} y1={sc.clip.y} x2={sc.zeroX} y2={sc.baseY}
+                                                  stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+                                            <line x1={sc.clip.x} y1={sc.zeroY} x2={sc.clip.x + sc.clip.w} y2={sc.zeroY}
+                                                  stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+                                            {#each sc.dots as d}
+                                                <circle cx={d.x} cy={d.y} r="2.6" fill={REG_COLORS.points}
+                                                        fill-opacity="0.55">
+                                                    <title>{d.p.date} · bench {formatPct(d.p.benchmark_return)} · ptf {formatPct(d.p.portfolio_return)}</title>
+                                                </circle>
+                                            {/each}
+                                            <line x1={sc.identity.x1} y1={sc.identity.y1} x2={sc.identity.x2}
+                                                  y2={sc.identity.y2} stroke="rgba(255,255,255,0.55)" stroke-width="1.5"
+                                                  stroke-dasharray="4 4"/>
+                                            <line x1={sc.fit.x1} y1={sc.fit.y1} x2={sc.fit.x2} y2={sc.fit.y2}
+                                                  stroke={REG_COLORS.fit} stroke-width="2.5"/>
+                                        </g>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            {@const rr = getRegRolling(regResult)}
+                            {#if rr}
+                                <div class="mcChartWrap varTableGap">
+                                    <div class="varLegendRow">
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{REG_COLORS.points}"></span>
+                                            <span class="mono soft xsmall">Rolling R² (left)</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varSwatch" style="background:{REG_COLORS.beta}"></span>
+                                            <span class="mono soft xsmall">Rolling β (right)</span>
+                                        </span>
+                                        <span class="varLegendItem">
+                                            <span class="varDash"></span>
+                                            <span class="mono soft xsmall">Full-sample R² {rs.r_squared.toFixed(2)}</span>
+                                        </span>
+                                        <span class="mono soft xsmall" style="margin-left:auto">
+                                            window {regResult.rolling_window} {regResult.frequency === "daily" ? "days" : "weeks"}
+                                        </span>
+                                    </div>
+                                    <svg class="pvarChart" viewBox="0 0 {REG_W} {REG_ROLL_H}"
+                                         preserveAspectRatio="xMidYMid meet" role="img"
+                                         aria-label="Rolling R² and beta of the portfolio against {regResult.benchmark}">
+                                        {#each rr.r2Ticks as tick}
+                                            <line x1={rr.x0} y1={tick.y} x2={rr.x1} y2={tick.y}
+                                                  stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+                                            <text x={rr.x0 - 8} y={tick.y + 3} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="end" class="mono">{tick.value.toFixed(1)}</text>
+                                        {/each}
+                                        {#each rr.betaTicks as tick}
+                                            <text x={rr.x1 + 8} y={tick.y + 3} fill={REG_COLORS.beta}
+                                                  font-size="10" text-anchor="start" class="mono">{tick.value.toFixed(2)}</text>
+                                        {/each}
+                                        {#each rr.xTicks as tick}
+                                            <text x={tick.x} y={rr.baseY + 16} fill="rgba(255,255,255,0.45)"
+                                                  font-size="10" text-anchor="middle" class="mono">{tick.label}</text>
+                                        {/each}
+                                        <line x1={rr.x0} y1={rr.fullR2Y} x2={rr.x1} y2={rr.fullR2Y}
+                                              stroke="rgba(255,255,255,0.55)" stroke-width="1.5" stroke-dasharray="4 4"/>
+                                        <path d={rr.betaPath} fill="none" stroke={REG_COLORS.beta} stroke-width="1.5"
+                                              stroke-opacity="0.85"/>
+                                        <path d={rr.r2Path} fill="none" stroke={REG_COLORS.points} stroke-width="2"/>
+                                        <line x1={rr.x0} y1={rr.baseY} x2={rr.x1} y2={rr.baseY}
+                                              stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+                                    </svg>
+                                </div>
+                            {/if}
+
+                            <div class="tableWrap varTableGap">
+                                <table class="kittTable">
+                                    <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Weight</th>
+                                        <th>β to {regResult.benchmark}</th>
+                                        <th>R²</th>
+                                        <th>Correlation</th>
+                                        <th>β contribution</th>
+                                        <th>% of ptf β</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {#each [...regResult.assets].sort((a, b) => b.beta_contribution - a.beta_contribution) as a (a.ticker)}
+                                        <tr>
+                                            <td><span class="mono">{a.ticker}</span></td>
+                                            <td><span class="mono soft">{formatPct(a.weight)}</span></td>
+                                            <td><span class="mono">{formatNum(a.beta, 2)}</span></td>
+                                            <td><span class="mono">{formatNum(a.r_squared, 2)}</span></td>
+                                            <td><span class="mono">{formatNum(a.correlation, 2)}</span></td>
+                                            <td><span class="mono">{formatNum(a.beta_contribution, 3)}</span></td>
+                                            <td><span class="mono">{rs.beta !== 0 ? formatPct(a.beta_contribution / rs.beta) : "—"}</span></td>
+                                        </tr>
+                                    {/each}
+                                    <tr>
+                                        <td><span class="mono bold">Portfolio</span></td>
+                                        <td><span class="mono soft">100.00%</span></td>
+                                        <td><span class="mono bold">{formatNum(rs.beta, 2)}</span></td>
+                                        <td><span class="mono bold">{formatNum(rs.r_squared, 2)}</span></td>
+                                        <td><span class="mono">{formatNum(rs.correlation, 2)}</span></td>
+                                        <td><span class="mono bold">{formatNum(rs.beta, 3)}</span></td>
+                                        <td><span class="mono soft">100.00%</span></td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="mcFootnote soft">
+                                OLS on {regResult.observations} {regResult.frequency} returns · {regResult.start_date_used}
+                                → {regResult.end_date_used} · ptf = α + β × {regResult.benchmark} + ε · raw (not excess)
+                                returns, fixed weights rebalanced each period · all series in {regResult.base_currency}
+                                {#if regConvertedSeries(regResult).length > 0}
+                                    (converted with Yahoo FX closes: {regConvertedSeries(regResult).join(", ")})
+                                {:else}
+                                    (no conversion needed)
+                                {/if}
+                                · R² = systematic share of the variance
+                                · use weekly returns when the benchmark trades in another time zone (closing-time
+                                mismatch lowers daily R²)
+                                {#if excludedSymbols.length > 0}
+                                    · excluding {excludedSymbols.join(", ")}
+                                {/if}
+                                {#if Object.keys(regResult.errors).length > 0}
+                                    · Skipped tickers: {Object.keys(regResult.errors).join(", ")}
+                                {/if}
+                            </div>
+                        {:else if !isFetchingReg}
+                            <div class="emptyState">Click "Run regression" to measure how much of your portfolio's
+                                variance {regBenchmark || "the benchmark"} explains over the last {regLookback}.
                             </div>
                         {/if}
                     </div>
@@ -5481,6 +6030,36 @@
         .healthHeadline {
             grid-template-columns: 1fr;
         }
+    }
+
+    .regSplit {
+        display: flex;
+        height: 26px;
+        margin: 14px 0 4px 0;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .regSplitSys,
+    .regSplitIdio {
+        display: flex;
+        align-items: center;
+        padding: 0 10px;
+        white-space: nowrap;
+        overflow: hidden;
+        color: rgba(255, 255, 255, 0.92);
+    }
+
+    .regSplitSys {
+        background: rgba(46, 143, 179, 0.75);
+    }
+
+    .regSplitIdio {
+        flex: 1;
+        justify-content: flex-end;
+        background: rgba(255, 255, 255, 0.06);
+        color: rgba(235, 235, 245, 0.75);
     }
 
     .healthBigKpi {

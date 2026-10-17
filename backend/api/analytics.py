@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any, Tuple
-from scipy.stats import norm
+from scipy.stats import norm, t as student_t
 from scipy.optimize import minimize
 
 import yfinance as yf
@@ -60,6 +60,11 @@ BL_CACHE = TTLCache(maxsize=200, ttl=600)
 PCA_CACHE = TTLCache(maxsize=200, ttl=600)
 
 PORTVAR_CACHE = TTLCache(maxsize=500, ttl=600)
+
+REGRESSION_CACHE = TTLCache(maxsize=500, ttl=600)
+
+# Quote currency per ticker barely ever changes: keep it for a day
+CURRENCY_CACHE = TTLCache(maxsize=5000, ttl=86400)
 
 _PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
@@ -669,6 +674,81 @@ class PortfolioVaREsRequest(BaseModel):
     confidence_levels: List[float] = Field(default_factory=lambda: [0.95, 0.99])
     horizon_days: int = Field(default=1, ge=1, le=60)
     portfolio_value: Optional[float] = Field(default=None, gt=0)
+
+
+RegressionFrequency = Literal["daily", "weekly"]
+
+
+class PortfolioRegressionRequest(BaseModel):
+    tickers: List[str] = Field(min_length=1, max_length=100)
+    weights: List[float] = Field(min_length=1, max_length=100)
+    benchmark: str = Field(default="URTH", min_length=1, max_length=32)
+    lookback_period: str = "3Y"
+    auto_adjust: bool = True
+    frequency: RegressionFrequency = "daily"
+    base_currency: str = Field(default="EUR", min_length=3, max_length=3)
+
+
+class RegressionStats(BaseModel):
+    r_squared: float
+    adj_r_squared: float
+    correlation: float
+    beta: float
+    beta_std_err: float
+    beta_t_stat: float
+    alpha: float                      # per period, decimal
+    alpha_annualized: float
+    alpha_t_stat: float
+    alpha_p_value: float
+    total_volatility: float           # annualized portfolio volatility
+    systematic_volatility: float      # annualized |beta| * benchmark volatility
+    idiosyncratic_volatility: float   # annualized residual volatility
+    benchmark_volatility: float
+    tracking_error: float             # annualized std(portfolio - benchmark)
+    information_ratio: float
+    portfolio_return_annualized: float
+    benchmark_return_annualized: float
+
+
+class RegressionPoint(BaseModel):
+    date: str
+    benchmark_return: float
+    portfolio_return: float
+
+
+class RollingR2Point(BaseModel):
+    date: str
+    r_squared: float
+    beta: float
+
+
+class AssetRegression(BaseModel):
+    ticker: str
+    weight: float
+    beta: float
+    r_squared: float
+    correlation: float
+    beta_contribution: float          # weight * beta, sums to the portfolio beta
+
+
+class PortfolioRegressionResponse(BaseModel):
+    tickers: List[str]
+    weights: List[float]
+    benchmark: str
+    frequency: RegressionFrequency
+    lookback_period: str
+    base_currency: str
+    currencies: Dict[str, str]        # quote currency of each series before conversion
+    observations: int
+    start_date_used: str
+    end_date_used: str
+    rolling_window: int
+    stats: RegressionStats
+    points: List[RegressionPoint]
+    rolling: List[RollingR2Point]
+    assets: List[AssetRegression]
+    warnings: List[str] = Field(default_factory=list)
+    errors: Dict[str, str] = Field(default_factory=dict)
 
 
 class PortfolioHealthRequest(BaseModel):
@@ -3842,6 +3922,277 @@ def yahoo_portfolio_var_es_post(req: PortfolioVaREsRequest):
             confidence_levels=req.confidence_levels,
             horizon_days=req.horizon_days,
             portfolio_value=req.portfolio_value,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# Portfolio regression — R² against a benchmark
+# =========================
+
+_REGRESSION_ANNUALIZATION = {"daily": 252.0, "weekly": 52.0}
+_REGRESSION_ROLLING_WINDOW = {"daily": 63, "weekly": 26}  # ~ one quarter / half a year
+
+
+# Yahoo quotes some listings in minor units (LSE in pence, JSE in cents...)
+_MINOR_CURRENCY_UNITS = {"GBp": ("GBP", 0.01), "GBX": ("GBP", 0.01), "ZAc": ("ZAR", 0.01), "ILA": ("ILS", 0.01)}
+
+
+def _ticker_currency(ticker: str) -> Optional[str]:
+    """Quote currency reported by Yahoo (may be a minor unit such as 'GBp')."""
+    if ticker in CURRENCY_CACHE:
+        return CURRENCY_CACHE[ticker]
+    try:
+        currency = yf.Ticker(ticker).fast_info["currency"]
+    except Exception:
+        currency = None
+    if currency:
+        CURRENCY_CACHE[ticker] = currency
+    return currency
+
+
+def _convert_close_to_base(
+    close: pd.DataFrame,
+    base_currency: str,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> Tuple[pd.DataFrame, Dict[str, str], List[str]]:
+    """
+    Express every price series of `close` in `base_currency`, using Yahoo FX
+    closes ('USDEUR=X' = EUR per 1 USD), forward-filled onto the price dates.
+    Returns the converted prices, the quote currency of each ticker and warnings.
+    """
+    currencies: Dict[str, str] = {}
+    warnings: List[str] = []
+    factors: Dict[str, Tuple[str, float]] = {}
+
+    for ticker in close.columns:
+        quote = _ticker_currency(ticker)
+        if not quote:
+            warnings.append(f"Currency of {ticker} unknown on Yahoo — assumed {base_currency}")
+            quote = base_currency
+        currencies[ticker] = quote
+        factors[ticker] = _MINOR_CURRENCY_UNITS.get(quote, (quote.upper(), 1.0))
+
+    foreign = sorted({ccy for ccy, _ in factors.values() if ccy != base_currency})
+    fx = pd.DataFrame()
+    if foreign:
+        fx_tickers = [f"{ccy}{base_currency}=X" for ccy in foreign]
+        fx = _download_close_daily_multi(fx_tickers, start_ts, end_ts, auto_adjust=False)
+        fx = fx.reindex(close.index.union(fx.index)).sort_index().ffill().reindex(close.index)
+
+    converted = close.copy()
+    for ticker, (ccy, scale) in factors.items():
+        series = close[ticker] * scale
+        if ccy != base_currency:
+            pair = f"{ccy}{base_currency}=X"
+            if pair not in fx.columns or fx[pair].dropna().empty:
+                warnings.append(f"No {pair} rate on Yahoo — {ticker} left in {ccy}")
+            else:
+                series = series * fx[pair]
+        converted[ticker] = series
+
+    return converted, currencies, warnings
+
+
+def _ols_simple(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+    """OLS of y = alpha + beta * x + e, with classical standard errors."""
+    n = len(x)
+    x_mean, y_mean = float(np.mean(x)), float(np.mean(y))
+    sxx = float(np.sum((x - x_mean) ** 2))
+    syy = float(np.sum((y - y_mean) ** 2))
+    if sxx <= 0:
+        raise ValueError("Benchmark returns have zero variance")
+
+    beta = float(np.sum((x - x_mean) * (y - y_mean)) / sxx)
+    alpha = y_mean - beta * x_mean
+    resid = y - alpha - beta * x
+    sse = float(np.sum(resid ** 2))
+
+    r2 = 1.0 - sse / syy if syy > 0 else 0.0
+    dof = n - 2
+    sigma2 = sse / dof if dof > 0 else 0.0
+    se_beta = float(np.sqrt(sigma2 / sxx))
+    se_alpha = float(np.sqrt(sigma2 * (1.0 / n + x_mean ** 2 / sxx)))
+
+    return {
+        "alpha": alpha,
+        "beta": beta,
+        "r_squared": r2,
+        "adj_r_squared": 1.0 - (1.0 - r2) * (n - 1) / dof if dof > 0 else r2,
+        "se_alpha": se_alpha,
+        "se_beta": se_beta,
+        "resid_std": float(np.sqrt(sigma2)),
+        "dof": dof,
+    }
+
+
+def _run_portfolio_regression(
+    tickers: List[str],
+    weights: List[float],
+    benchmark: str,
+    lookback_period: str,
+    auto_adjust: bool,
+    frequency: str,
+    base_currency: str,
+) -> Dict[str, Any]:
+    if len(tickers) != len(weights):
+        raise ValueError("tickers and weights must have the same length")
+
+    benchmark = benchmark.strip().upper()
+    if not benchmark:
+        raise ValueError("benchmark is required")
+    base_currency = base_currency.strip().upper()
+
+    w_arr = np.array(weights, dtype=float)
+    if np.any(w_arr < 0):
+        raise ValueError("weights must be non-negative")
+    if w_arr.sum() <= 0:
+        raise ValueError("sum of weights must be > 0")
+    w_arr = w_arr / w_arr.sum()
+
+    days = _PERIOD_DAYS.get(lookback_period.upper(), 1095)
+    end_ts = pd.Timestamp.now().normalize()
+    start_ts = end_ts - pd.Timedelta(days=days)
+
+    cache_key = (
+        "regression",
+        tuple(tickers),
+        tuple(round(float(x), 6) for x in w_arr.tolist()),
+        benchmark,
+        lookback_period,
+        auto_adjust,
+        frequency,
+        base_currency,
+        end_ts.date().isoformat(),
+    )
+    if cache_key in REGRESSION_CACHE:
+        return REGRESSION_CACHE[cache_key]
+
+    download = list(dict.fromkeys(tickers + [benchmark]))
+    close = _download_close_daily_multi(download, start_ts, end_ts, auto_adjust)
+    if close.empty:
+        raise ValueError("No price data returned by Yahoo")
+    if benchmark not in close.columns or close[benchmark].dropna().empty:
+        raise ValueError(f"Benchmark '{benchmark}' not found on Yahoo Finance")
+
+    available = [t for t in tickers if t in close.columns and not close[t].dropna().empty]
+    errors: Dict[str, str] = {t: "Ticker not found in downloaded data" for t in tickers if t not in available}
+    if not available:
+        raise ValueError("No tickers available in downloaded data")
+
+    keep_mask = np.array([t in available for t in tickers])
+    w_kept = w_arr[keep_mask]
+    w_kept = w_kept / w_kept.sum()
+
+    # Same currency on both sides, otherwise FX moves end up in the residual and depress R²
+    prices, currencies, warnings = _convert_close_to_base(
+        close[list(dict.fromkeys(available + [benchmark]))], base_currency, start_ts, end_ts
+    )
+    prices = prices.dropna(how="any")
+    if frequency == "weekly":
+        prices = prices.resample("W-FRI").last().dropna(how="any")
+    rets = prices.pct_change().dropna().loc[start_ts:]
+
+    window = _REGRESSION_ROLLING_WINDOW[frequency]
+    if len(rets) < 20:
+        raise ValueError("Not enough overlapping return observations (need >= 20)")
+
+    asset_rets = rets[available]
+    port = pd.Series(asset_rets.to_numpy() @ w_kept, index=rets.index)  # fixed weights, rebalanced each period
+    bench = rets[benchmark]
+
+    x, y = bench.to_numpy(), port.to_numpy()
+    fit = _ols_simple(x, y)
+    ann = _REGRESSION_ANNUALIZATION[frequency]
+    sqrt_ann = float(np.sqrt(ann))
+
+    beta_t = fit["beta"] / fit["se_beta"] if fit["se_beta"] > 0 else 0.0
+    alpha_t = fit["alpha"] / fit["se_alpha"] if fit["se_alpha"] > 0 else 0.0
+    alpha_p = float(2.0 * student_t.sf(abs(alpha_t), fit["dof"])) if fit["dof"] > 0 else 1.0
+
+    active = y - x
+    te = float(np.std(active, ddof=1)) * sqrt_ann
+    bench_vol = float(np.std(x, ddof=1)) * sqrt_ann
+
+    # Rolling fit: R² is the squared rolling correlation, beta = cov / var
+    roll_corr = port.rolling(window).corr(bench)
+    roll_beta = port.rolling(window).cov(bench) / bench.rolling(window).var()
+    rolling = [
+        {"date": d.date().isoformat(), "r_squared": float(c ** 2), "beta": float(b)}
+        for d, c, b in zip(rets.index, roll_corr, roll_beta)
+        if np.isfinite(c) and np.isfinite(b)
+    ]
+
+    assets = []
+    for ticker, w in zip(available, w_kept):
+        a_fit = _ols_simple(x, asset_rets[ticker].to_numpy())
+        assets.append({
+            "ticker": ticker,
+            "weight": float(w),
+            "beta": a_fit["beta"],
+            "r_squared": a_fit["r_squared"],
+            "correlation": float(np.sign(a_fit["beta"]) * np.sqrt(max(a_fit["r_squared"], 0.0))),
+            "beta_contribution": float(w * a_fit["beta"]),
+        })
+
+    out = {
+        "tickers": available,
+        "weights": w_kept.tolist(),
+        "benchmark": benchmark,
+        "frequency": frequency,
+        "lookback_period": lookback_period,
+        "base_currency": base_currency,
+        "currencies": currencies,
+        "observations": int(len(rets)),
+        "start_date_used": rets.index[0].date().isoformat(),
+        "end_date_used": rets.index[-1].date().isoformat(),
+        "rolling_window": window,
+        "stats": {
+            "r_squared": fit["r_squared"],
+            "adj_r_squared": fit["adj_r_squared"],
+            "correlation": float(np.sign(fit["beta"]) * np.sqrt(max(fit["r_squared"], 0.0))),
+            "beta": fit["beta"],
+            "beta_std_err": fit["se_beta"],
+            "beta_t_stat": beta_t,
+            "alpha": fit["alpha"],
+            "alpha_annualized": fit["alpha"] * ann,
+            "alpha_t_stat": alpha_t,
+            "alpha_p_value": alpha_p,
+            "total_volatility": float(np.std(y, ddof=1)) * sqrt_ann,
+            "systematic_volatility": abs(fit["beta"]) * bench_vol,
+            "idiosyncratic_volatility": fit["resid_std"] * sqrt_ann,
+            "benchmark_volatility": bench_vol,
+            "tracking_error": te,
+            "information_ratio": float(np.mean(active)) * ann / te if te > 0 else 0.0,
+            "portfolio_return_annualized": float(np.mean(y)) * ann,
+            "benchmark_return_annualized": float(np.mean(x)) * ann,
+        },
+        "points": [
+            {"date": d.date().isoformat(), "benchmark_return": float(bx), "portfolio_return": float(py)}
+            for d, bx, py in zip(rets.index, x, y)
+        ],
+        "rolling": rolling,
+        "assets": assets,
+        "warnings": warnings,
+        "errors": errors,
+    }
+    REGRESSION_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/yahoo/portfolio-regression", response_model=PortfolioRegressionResponse)
+def yahoo_portfolio_regression_post(req: PortfolioRegressionRequest):
+    try:
+        return _run_portfolio_regression(
+            tickers=req.tickers,
+            weights=req.weights,
+            benchmark=req.benchmark,
+            lookback_period=req.lookback_period,
+            auto_adjust=req.auto_adjust,
+            frequency=req.frequency,
+            base_currency=req.base_currency,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
