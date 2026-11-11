@@ -1,0 +1,81 @@
+name: kitt-prod
+
+# Secrets lus depuis ./.env (voir .env.example) et backend/.env (ETFBook)
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: kitt_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432" # accessible uniquement depuis l'hôte
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck: # Vérification de l'état pour s'assurer que PostgreSQL est prêt
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: kitt_pgadmin_container
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    ports:
+      - "127.0.0.1:8080:80" # accessible uniquement depuis l'hôte
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+
+  api:
+    image: ghcr.io/vincent-bulut/kitt-api:latest
+    build:
+      context: ./
+      dockerfile: backend/Dockerfile
+    container_name: kitt_api_container
+    ports:
+      # Publié car le frontend appelle directement http://localhost:8000/ (PUBLIC_APP_API_URL)
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: backend/.env # variables ETFBook (non embarquées dans l'image)
+    environment: # prioritaire sur env_file
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${POSTGRES_DB}
+      DATABASE_USER: ${POSTGRES_USER}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      ENV_KITT: prod
+
+  webapp:
+    image: ghcr.io/vincent-bulut/kitt-frontend:latest
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    container_name: kitt_frontend_container
+    # Pas de port publié : servi via le reverse proxy nginx (webapp:80)
+    depends_on:
+      - api
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: kitt_nginx_container
+    ports:
+      - "80:5700"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - webapp
+
+volumes:
+  postgres_data:
+  pgadmin-data:
