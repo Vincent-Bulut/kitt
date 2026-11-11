@@ -1,19 +1,26 @@
 [project]
 name = "backend"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "KITT portfolio management API"
 requires-python = ">=3.12"
 dependencies = [
     "cachetools>=7.0.0",
-    "fastapi>=0.128.2",
+    "fastapi>=0.115.6",
     "httpx>=0.28.1",
-    "pandas>=3.0.0",
-    "psycopg2-binary>=2.9.11",
-    "python-multipart>=0.0.22",
-    "requests>=2.32.5",
-    "scipy>=1.17.0",
-    "sqlalchemy>=2.0.46",
-    "uvicorn>=0.40.0",
+    "numpy>=2.4.2",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.2",
+    "psycopg2-binary>=2.9.10",
+    "python-multipart>=0.0.27",
+    "requests>=2.32.3",
+    "scipy>=1.17.1",
+    "sqlalchemy>=2.0.36",
+    "uvicorn>=0.32.1",
     "yfinance>=1.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
 ]

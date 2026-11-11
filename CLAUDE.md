@@ -12,15 +12,16 @@ KITT is a portfolio management application with a Python/FastAPI backend, a Svel
 
 ```bash
 # Start only the database (for local dev)
-docker-compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml up -d
 
 # Run the API locally (from project root)
 cd backend && uvicorn backend.api.main:api --host 0.0.0.0 --port 8000 --reload
 
 # Install dependencies
 cd backend && uv sync
-# or
-pip install -r backend/requirements.txt
+
+# Add a dependency (updates pyproject.toml + uv.lock)
+cd backend && uv add <package>
 ```
 
 The backend must be run from the **project root** (not from `backend/`) because imports use the `backend.api.*` package path and `PYTHONPATH` is set to `/app` in Docker.
@@ -38,8 +39,8 @@ npm run check        # TypeScript + Svelte type checking
 ### Full Stack (Docker)
 
 ```bash
-docker-compose up          # prod-like: postgres + pgadmin + api + webapp + nginx
-docker-compose up --build  # rebuild images
+docker compose up          # prod-like: postgres + pgadmin + api + webapp + nginx
+docker compose up --build  # rebuild images
 ```
 
 In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/api/` → FastAPI on port 8000, and `/` → the static frontend served by nginx on port 80.

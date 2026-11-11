@@ -1,23 +1,19 @@
-# Utilisez l'image Node.js comme base
-FROM node:22 AS builder
+# --- Étape 1 : build statique SvelteKit ---
+FROM node:22-slim AS builder
 
-# Définir le répertoire de travail dans le conteneur
 WORKDIR /app/frontend
 
-# Copier uniquement les fichiers nécessaires pour installer les dépendances
-COPY package*.json ./
+# Installe exactement les versions du package-lock.json
+COPY package.json package-lock.json ./
+RUN npm ci
 
-# Installer les dépendances
-RUN npm install
-
-# Copier tout le reste des fichiers dans le conteneur
+# Copie les sources (node_modules/build exclus via .dockerignore ; .env conservé
+# car PUBLIC_APP_API_URL est injecté au build)
 COPY . .
-
 RUN npm run build
 
-CMD ["npm", "run", "dev", "--", "--host"]
-
-FROM nginx:latest
+# --- Étape 2 : service des fichiers statiques ---
+FROM nginx:1.27-alpine
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/frontend/build /usr/share/nginx/html
