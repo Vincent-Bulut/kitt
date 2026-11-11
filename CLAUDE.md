@@ -11,20 +11,25 @@ KITT is a portfolio management application with a Python/FastAPI backend, a Svel
 ### Backend (Python 3.12, managed with `uv`)
 
 ```bash
-# Start only the database (for local dev)
+# Start only the database (for local dev, Postgres on localhost:5433, pgAdmin on :8081)
 docker compose -f docker-compose.dev.yml up -d
 
-# Run the API locally (from project root)
-cd backend && uvicorn backend.api.main:api --host 0.0.0.0 --port 8000 --reload
+# Install dependencies (creates backend/.venv)
+uv sync --project backend
 
-# Install dependencies
-cd backend && uv sync
+# Run the API locally — from the PROJECT ROOT, loading backend/.env
+uv run --project backend --env-file backend/.env uvicorn backend.api.main:api --reload
 
-# Add a dependency (updates pyproject.toml + uv.lock)
-cd backend && uv add <package>
+# Add a dependency (updates backend/pyproject.toml + backend/uv.lock)
+uv add --project backend <package>
+uv add --project backend --dev <package>   # dev-only (pytest, ruff…), excluded from the Docker image
+
+# Lint / tests
+uv run --project backend ruff check backend
+uv run --project backend pytest
 ```
 
-The backend must be run from the **project root** (not from `backend/`) because imports use the `backend.api.*` package path and `PYTHONPATH` is set to `/app` in Docker.
+The backend must be run from the **project root** (not from `backend/`) because imports use the `backend.api.*` package path and `PYTHONPATH` is set to `/app` in Docker. Nothing in the code loads `.env` files: variables come from `--env-file` locally and from `env_file` in Docker Compose.
 
 ### Frontend (SvelteKit + Vite)
 
@@ -43,7 +48,11 @@ docker compose up          # prod-like: postgres + pgadmin + api + webapp + ngin
 docker compose up --build  # rebuild images
 ```
 
-In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/api/` → FastAPI on port 8000, and `/` → the static frontend served by nginx on port 80.
+Requires a root `.env` (copy `.env.example`) for Postgres/pgAdmin credentials.
+
+In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/api/` → FastAPI on port 8000, and `/` → the static frontend served by nginx on port 80. Host-published ports: 80 (nginx), 8000 (API — the frontend calls `http://localhost:8000/` directly), and 127.0.0.1-only 5432 (Postgres) and 8080 (pgAdmin). The frontend container publishes no port.
+
+Images: the API image (`backend/Dockerfile`) is built from the project root with `uv sync --locked --no-dev` and runs as a non-root user; `.env` files are excluded from build contexts (`.dockerignore`). The frontend image is a two-stage build (`npm ci` + `vite build`, then nginx); `frontend/.env` is kept in its build context because `PUBLIC_*` variables are inlined at build time.
 
 ## Architecture
 
@@ -55,7 +64,7 @@ In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/
   - `referential.py` — Asset listing, ETFBook static-data proxy, Excel upload/upsert into `assets` table (`/referential/`)
   - `analytics.py` — Yahoo Finance analytics: performance table, arithmetic return, cumulative returns series, drawdown analysis, annualized volatility, VaR/ES (`/analytics/yahoo/…`). All computation results are cached with `cachetools.TTLCache` (10 min).
   - `etfbook_primary.py` — Async proxy to ETFBook dynamic data API (NAV/AUM time series), chunked by 50 ISINs (`/etfbook/analytics/dynamic-data`)
-- **DB layer**: SQLAlchemy ORM. `database.py` switches between `localhost` and the `postgres` Docker hostname based on the `ENV_KITT` env var (set to `prod` in Docker). Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
+- **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
 - **`utils.py`**: single helper `convert_to_timestamp()` used across analytics routes to normalise date strings.
 
 ### Frontend (`frontend/`)
@@ -66,14 +75,21 @@ In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/
 
 ### Environment Variables
 
-**Backend** (`backend/.env`):
+**Docker Compose** (root `.env`, git-ignored — template in `.env.example`):
+| Variable | Purpose |
+|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres credentials (also injected into the API container as `DATABASE_*`) |
+| `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` | pgAdmin login |
+
+**Backend** (`backend/.env`, git-ignored, never baked into the image):
 | Variable | Purpose |
 |---|---|
 | `ETFBOOK_API_BASE_URL` | Base URL for the ETFBook external API |
 | `ETFBOOK_REF_API_TOKEN` | Auth token for ETFBook API |
 | `ETFBOOK_REF_API_BASE_URL` | Path for static data endpoint |
 | `ETFBOOK_PRIMARY_TIME_SERIES` | Path for dynamic data endpoint |
-| `ENV_KITT` | Set to `prod` to use the Docker DB hostname |
+| `DATABASE_USER` / `DATABASE_PASSWORD` / `DATABASE_HOST` / `DATABASE_PORT` / `DATABASE_NAME` | DB connection for local runs (overridden by Compose in Docker) |
+| `ENV_KITT` | Set to `prod` in Docker (informational) |
 
 **Frontend** (`frontend/.env`):
 | Variable | Purpose |
