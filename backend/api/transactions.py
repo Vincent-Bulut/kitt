@@ -130,39 +130,6 @@ def _fetch_last_prices(symbols: List[str]) -> Tuple[Dict[str, float], Dict[str, 
             errors[s] = "No price data returned by yfinance"
         return prices, errors, asof_used
 
-    def _fetch_last_prices(symbols: List[str]) -> Tuple[Dict[str, float], Dict[str, str], date_type | None]:
-        """Return (prices, errors, asof_used).
-
-        Uses yfinance.download for a multi-ticker single call. Picks the most
-        recent non-NaN close for each symbol.
-        """
-    prices: Dict[str, float] = {}
-    errors: Dict[str, str] = {}
-    asof_used: date_type | None = None
-
-    if not symbols:
-        return prices, errors, asof_used
-
-    try:
-        df = yf.download(
-            tickers=symbols,
-            period="5d",
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            group_by="ticker" if len(symbols) > 1 else "column",
-            threads=True,
-        )
-    except Exception as e:
-        for s in symbols:
-            errors[s] = f"yfinance download failed: {e}"
-        return prices, errors, asof_used
-
-    if df is None or df.empty:
-        for s in symbols:
-            errors[s] = "No price data returned by yfinance"
-        return prices, errors, asof_used
-
     def _pick_close(close_data: pd.Series | pd.DataFrame) -> Tuple[float | None, date_type | None]:
         if isinstance(close_data, pd.DataFrame):
             if close_data.empty:

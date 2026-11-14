@@ -55,6 +55,9 @@ def update_portfolio(
         db.refresh(existing_portfolio)
         return existing_portfolio
 
+    except HTTPException:
+        # Laisse passer les 404 levées dans le try (sinon converties en 500)
+        raise
     except SQLAlchemyError as e:
         raise HTTPException(
             status_code=400,
@@ -83,6 +86,9 @@ def delete_portfolio(
 
         return {"message": "Portfolio supprimé avec succès"}
 
+    except HTTPException:
+        # Laisse passer les 404 levées dans le try (sinon converties en 500)
+        raise
     except SQLAlchemyError as e:
         raise HTTPException(
             status_code=400,
@@ -108,6 +114,9 @@ def get_portfolio(
             )
         return portfolio
 
+    except HTTPException:
+        # Laisse passer les 404 levées dans le try (sinon converties en 500)
+        raise
     except SQLAlchemyError as e:
         raise HTTPException(
             status_code=400,

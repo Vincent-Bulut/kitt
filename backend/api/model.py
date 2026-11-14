@@ -1,8 +1,7 @@
 import datetime
 import enum
 from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date, Float, Enum, UniqueConstraint, Index
-from sqlalchemy.orm import Mapped, relationship, DeclarativeBase
-from sqlalchemy.testing.schema import mapped_column
+from sqlalchemy.orm import Mapped, relationship, DeclarativeBase, mapped_column
 
 from backend.api.database import engine
 

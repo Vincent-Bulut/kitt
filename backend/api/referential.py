@@ -85,7 +85,7 @@ def list_assets(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Erreur de base de données : {str(e)}")
 
 @router.post("/upload-excel")
-async def upload_referential_excel(
+def upload_referential_excel(
         file: UploadFile = File(...),
         db: Session = Depends(get_db),
 ):
@@ -94,7 +94,7 @@ async def upload_referential_excel(
         raise HTTPException(status_code=400, detail="Please upload an Excel file (.xlsx/.xls).")
 
     try:
-        content = await file.read()
+        content = file.file.read()
         if not content:
             raise HTTPException(status_code=400, detail="Empty file.")
     except Exception as e:
