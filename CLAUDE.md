@@ -24,6 +24,11 @@ uv run --project backend --env-file backend/.env uvicorn backend.api.main:api --
 uv add --project backend <package>
 uv add --project backend --dev <package>   # dev-only (pytest, ruff…), excluded from the Docker image
 
+# Database migrations (Alembic, config in backend/alembic.ini, revisions in backend/migrations/versions/)
+uv run --project backend --env-file backend/.env python -m backend.migrate          # stamp legacy DB if needed + upgrade head
+uv run --project backend --env-file backend/.env alembic -c backend/alembic.ini revision --autogenerate -m "..."
+uv run --project backend --env-file backend/.env alembic -c backend/alembic.ini check  # models vs DB drift
+
 # Lint / tests
 uv run --project backend ruff check backend
 uv run --project backend pytest
@@ -71,7 +76,7 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
   - `etfbook_primary.py` — Async proxy to ETFBook dynamic data API (NAV/AUM time series), chunked by 50 ISINs. Not mounted in `main.py`.
 - **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
 - **`utils.py`**: single helper `convert_to_timestamp()` used across analytics routes to normalise date strings.
-- **Tests** (`backend/tests/`): pure-function tests for analytics/positions/PEA parsing and HTTP tests that mount routers on a FastAPI app with `get_db` overridden to in-memory SQLite (`main.py` is not imported because it calls `create_all` on Postgres). Ruff and pytest config live in `backend/pyproject.toml`; CI is `.github/workflows/ci.yml`.
+- **Tests** (`backend/tests/`): pure-function tests for analytics/positions/PEA parsing and HTTP tests that mount routers on a FastAPI app with `get_db` overridden to in-memory SQLite (no Postgres needed; migrations are exercised by the `migrations` CI job instead). Ruff and pytest config live in `backend/pyproject.toml`; CI is `.github/workflows/ci.yml`.
 
 ### Frontend (`frontend/`)
 
@@ -107,4 +112,7 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 
 - **Portfolio**: top-level entity with date range and optional manager
 - **Assets**: ETF/stock reference data keyed by `symbol` (ticker), with ISIN, currency, fee, and up to 4-level category taxonomy
-- **Positions**: join between Portfolio and Assets with a quantity (`qte`)
+- **Positions**: join between Portfolio and Assets, unique per (portfolio, symbol); currently unused by the API
+- **Transaction**: BUY/SELL with quantity, price, fee, amount; the positions view is computed from transactions
+
+Schema changes go through Alembic, never `create_all()`: edit `model.py`, autogenerate a revision, review it. Money/quantity columns are `Numeric(..., asdecimal=False)` so the DB stores exact decimals while Python code keeps working with floats. The API container runs `python -m backend.migrate` before uvicorn (see `backend/Dockerfile`).

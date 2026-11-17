@@ -66,6 +66,8 @@ backend/
       schemas.py        Pydantic request / response models
     model.py          SQLAlchemy models (Portfolio, Assets, Positions, Transaction)
     schema.py         Pydantic request / response schemas
+  migrations/         Alembic revisions (applied automatically when the API container starts)
+  migrate.py          stamps pre-Alembic databases, then upgrades to head
   tests/              pytest suite (no network, no Postgres needed)
 frontend/             SvelteKit app (admin, analytics, portfolio, referential pages)
 ```
@@ -93,10 +95,21 @@ docker compose -f docker-compose.dev.yml up -d
 
 # API — run from the project root
 uv sync --project backend
+uv run --project backend --env-file backend/.env python -m backend.migrate   # apply migrations
 uv run --project backend --env-file backend/.env uvicorn backend.api.main:api --reload
 
 # Frontend
 cd frontend && npm install && npm run dev      # http://localhost:5173
+```
+
+### Database migrations
+
+The schema is managed with Alembic; monetary columns are exact `NUMERIC`.
+
+```bash
+# After changing backend/api/model.py
+uv run --project backend --env-file backend/.env alembic -c backend/alembic.ini revision --autogenerate -m "describe change"
+uv run --project backend --env-file backend/.env python -m backend.migrate
 ```
 
 ### Configuration
@@ -118,16 +131,15 @@ uv run --project backend pytest
 
 The test suite checks the quantitative core against closed-form results and simulated data
 (VaR/ES estimators, drawdowns, volatility scaling, mean-variance optimizers, WAC position accounting)
-and exercises the CRUD endpoints against an in-memory SQLite database. CI runs lint, tests and the
-frontend build on every push.
+and exercises the CRUD endpoints against an in-memory SQLite database. CI runs lint, tests, the
+frontend build, and replays the migrations on PostgreSQL (upgrade, `alembic check` for drift against
+the models, downgrade / upgrade round trip) on every push.
 
 ## Known limitations & roadmap
 
 This is a personal project used as a sandbox for portfolio analytics. Next steps:
 
 - [ ] Merge the remaining Yahoo download helpers into a single market-data client
-- [ ] Alembic migrations (tables are currently created at startup)
-- [ ] `Numeric` instead of `Float` for prices and amounts
 - [ ] Persist daily prices in PostgreSQL through a scheduled, incremental ingestion job instead of fetching on demand
 - [ ] Shared cache (Redis) instead of per-process in-memory caches
 - [ ] Split the portfolio page into components and fix `svelte-check` type errors
