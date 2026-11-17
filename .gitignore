@@ -22,8 +22,6 @@ htmlcov/
 # Local working files
 docs
 backend/input
-backend/alembic.ini
-backend/alembic
 
 # LLM context dumps
 frontend/llms-full.txt

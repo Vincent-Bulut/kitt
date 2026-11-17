@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "KITT portfolio management API"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.20.1",
     "cachetools>=7.0.0",
     "fastapi>=0.115.6",
     "httpx>=0.28.1",

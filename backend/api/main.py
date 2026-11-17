@@ -3,14 +3,10 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api import model
 from backend.api.admin import router as admin_router
 from backend.api.analytics import router as analytics_router
-from backend.api.database import engine
 from backend.api.referential import router as referential_router
 from backend.api.transactions import router as transactions_router
-
-model.Base.metadata.create_all(bind=engine)
 
 api = FastAPI(
     title="KITT API",
