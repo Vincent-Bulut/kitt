@@ -34,13 +34,13 @@ analytics (risk, performance, optimization) on market data from Yahoo Finance.
 
 ```
                 ┌──────────────────────────── docker compose ────────────────────────────┐
- Browser ──────▶│ nginx :80 ──▶ webapp (SvelteKit static build)                          │
-    │           │                                                                        │
-    └──────────▶│ api :8000 (FastAPI) ──▶ PostgreSQL ◀── pgAdmin (127.0.0.1 only)        │
-                │      │                                                                 │
-                └──────┼─────────────────────────────────────────────────────────────────┘
-                       ├──▶ Yahoo Finance (prices, FX)  — TTL-cached in memory
-                       └──▶ Euronext (PEA ETF list)
+ Browser ──────▶│ nginx :80 ─┬─ /      ──▶ webapp (SvelteKit static build)              │
+                │            └─ /api/  ──▶ api (FastAPI) ──▶ PostgreSQL                 │
+                │                            │                ▲                         │
+                │                            │                └── pgAdmin (127.0.0.1)   │
+                └────────────────────────────┼────────────────────────────────────────────┘
+                                             ├──▶ Yahoo Finance (prices, FX), TTL-cached
+                                             └──▶ Euronext (PEA ETF list)
 ```
 
 | Layer | Stack |
@@ -79,12 +79,15 @@ frontend/             SvelteKit app (admin, analytics, portfolio, referential pa
 ### Full stack with Docker
 
 ```bash
-cp .env.example .env           # set Postgres / pgAdmin credentials
+cp .env.example .env                    # set Postgres / pgAdmin credentials
+cp frontend/.env.example frontend/.env
 docker compose up --build
 ```
 
 - App: http://localhost
-- API docs (OpenAPI): http://localhost:8000/docs
+- API docs (OpenAPI): http://localhost/api/docs
+
+The API publishes no port: it is only reachable through nginx under `/api/`, on the same origin as the web app.
 
 ### Local development
 
@@ -99,8 +102,8 @@ uv sync --project backend
 uv run --project backend --env-file backend/.env python -m backend.migrate   # apply migrations
 uv run --project backend --env-file backend/.env uvicorn backend.api.main:api --reload
 
-# Frontend
-cd frontend && npm install && npm run dev      # http://localhost:5173
+# Frontend — Vite proxies /api/* to the API on :8000, like nginx does in production
+cd frontend && cp .env.example .env && npm install && npm run dev      # http://localhost:5173
 ```
 
 ### Database migrations
@@ -119,7 +122,8 @@ uv run --project backend --env-file backend/.env python -m backend.migrate
 |---|---|
 | `.env` (Compose) | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD`, `CORS_ORIGINS` |
 | `backend/.env` | `DATABASE_*` for local runs |
-| `frontend/.env` | `PUBLIC_APP_API_URL` (e.g. `http://localhost:8000/`) |
+| `frontend/.env` | `PUBLIC_APP_API_URL=/api/` (see `frontend/.env.example`) |
+| API container | `LOG_LEVEL` (default `INFO`) |
 
 Secrets are never committed nor baked into images.
 
