@@ -1,15 +1,16 @@
 import io
-import pandas as pd
-import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from typing import List, Optional, Literal, Dict, Any, Tuple
-from scipy.stats import norm, t as student_t
-from scipy.optimize import minimize
+from typing import Any, Literal
 
+import numpy as np
+import pandas as pd
 import yfinance as yf
 from cachetools import TTLCache
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from scipy.optimize import minimize
+from scipy.stats import norm
+from scipy.stats import t as student_t
 
 from backend.api import utils
 
@@ -79,20 +80,20 @@ _PERIOD_DAYS = {
 
 class YahooPerfRow(BaseModel):
     ticker: str
-    asof_requested: Optional[str]
+    asof_requested: str | None
     asof_used: str
     last: float
-    perf: Dict[Period, Optional[float]]
+    perf: dict[Period, float | None]
 
 
 class YahooPerfResponse(BaseModel):
-    data: List[YahooPerfRow]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    data: list[YahooPerfRow]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class YahooPerfRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=500)
-    asof: Optional[str] = None
+    tickers: list[str] = Field(min_length=1, max_length=500)
+    asof: str | None = None
     auto_adjust: bool = True
 
 class YahooReturnRow(BaseModel):
@@ -107,12 +108,12 @@ class YahooReturnRow(BaseModel):
 
 
 class YahooReturnResponse(BaseModel):
-    data: List[YahooReturnRow]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    data: list[YahooReturnRow]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class YahooReturnRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=500)
+    tickers: list[str] = Field(min_length=1, max_length=500)
     start_date: str  # YYYY-MM-DD
     end_date: str    # YYYY-MM-DD
     auto_adjust: bool = True
@@ -127,14 +128,14 @@ class YahooCumReturnsSeries(BaseModel):
     end_date_requested: str
     start_date_used: str
     base_price: float
-    points: List[CumReturnPoint]
+    points: list[CumReturnPoint]
 
 class YahooCumReturnsResponse(BaseModel):
-    data: List[YahooCumReturnsSeries]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    data: list[YahooCumReturnsSeries]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 class YahooCumReturnsRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=200)  # séries => limite plus basse
+    tickers: list[str] = Field(min_length=1, max_length=200)  # séries => limite plus basse
     start_date: str
     end_date: str
     auto_adjust: bool = True
@@ -142,7 +143,7 @@ class YahooCumReturnsRequest(BaseModel):
 class DrawdownEpisode(BaseModel):
     start_date: str
     trough_date: str
-    end_date: Optional[str]
+    end_date: str | None
     duration_days: int
     max_drawdown: float
 
@@ -158,7 +159,7 @@ class DrawdownMetrics(BaseModel):
 class DrawdownPath(BaseModel):
     peak_date: str
     trough_date: str
-    recovery_date: Optional[str]
+    recovery_date: str | None
     max_drawdown: float
 
 class DrawdownPoint(BaseModel):
@@ -173,15 +174,15 @@ class YahooDrawdownRow(BaseModel):
     end_date_requested: str
     metrics: DrawdownMetrics
     path: DrawdownPath
-    episodes: List[DrawdownEpisode] = Field(default_factory=list)
-    series: Optional[List[DrawdownPoint]] = None
+    episodes: list[DrawdownEpisode] = Field(default_factory=list)
+    series: list[DrawdownPoint] | None = None
 
 class YahooDrawdownResponse(BaseModel):
-    data: List[YahooDrawdownRow]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    data: list[YahooDrawdownRow]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 class YahooDrawdownRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=200)
+    tickers: list[str] = Field(min_length=1, max_length=200)
     start_date: str
     end_date: str
     auto_adjust: bool = True
@@ -204,12 +205,12 @@ class YahooAnnVolRow(BaseModel):
 
 
 class YahooAnnVolResponse(BaseModel):
-    data: List[YahooAnnVolRow]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    data: list[YahooAnnVolRow]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class YahooAnnVolRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=200)
+    tickers: list[str] = Field(min_length=1, max_length=200)
     start_date: str
     end_date: str
     auto_adjust: bool = True
@@ -236,37 +237,37 @@ class YahooVaREsRow(BaseModel):
     return_mode: ReturnMode
     horizon: str = "1D"
     price_type: str  # "Adjusted Close" or "Close"
-    points: List[VaREsPoint]
+    points: list[VaREsPoint]
 
 
 class YahooVaREsResponse(BaseModel):
-    data: List[YahooVaREsRow]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    data: list[YahooVaREsRow]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class YahooVaREsRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=200)
+    tickers: list[str] = Field(min_length=1, max_length=200)
     start_date: str
     end_date: str
     auto_adjust: bool = True
     return_mode: ReturnMode = "arith"
-    confidence_levels: List[float] = Field(default_factory=lambda: [0.95, 0.99])
+    confidence_levels: list[float] = Field(default_factory=lambda: [0.95, 0.99])
 
 
 class YahooAllMetricsResponse(BaseModel):
-    perf: Optional[YahooPerfResponse] = None
-    vol: Optional[YahooAnnVolResponse] = None
-    dd: Optional[YahooDrawdownResponse] = None
-    risk: Optional[YahooVaREsResponse] = None
-    cum_returns: Optional[YahooCumReturnsResponse] = None
+    perf: YahooPerfResponse | None = None
+    vol: YahooAnnVolResponse | None = None
+    dd: YahooDrawdownResponse | None = None
+    risk: YahooVaREsResponse | None = None
+    cum_returns: YahooCumReturnsResponse | None = None
 
 
 class MonteCarloPercentiles(BaseModel):
-    p5: List[float]
-    p25: List[float]
-    p50: List[float]
-    p75: List[float]
-    p95: List[float]
+    p5: list[float]
+    p25: list[float]
+    p50: list[float]
+    p75: list[float]
+    p95: list[float]
 
 
 class MonteCarloStats(BaseModel):
@@ -287,18 +288,18 @@ class MonteCarloStats(BaseModel):
 
 
 class MonteCarloResponse(BaseModel):
-    dates: List[str]
+    dates: list[str]
     percentiles: MonteCarloPercentiles
-    samples: List[List[float]]
+    samples: list[list[float]]
     stats: MonteCarloStats
-    tickers: List[str]
-    weights: List[float]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    tickers: list[str]
+    weights: list[float]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class MonteCarloRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=100)
-    weights: List[float] = Field(min_length=1, max_length=100)
+    tickers: list[str] = Field(min_length=1, max_length=100)
+    weights: list[float] = Field(min_length=1, max_length=100)
     horizon_days: int = Field(default=252, ge=10, le=2520)
     n_simulations: int = Field(default=1000, ge=50, le=20000)
     lookback_period: str = "3Y"
@@ -316,9 +317,9 @@ class CorrelationPair(BaseModel):
 
 class CorrelationStats(BaseModel):
     avg_correlation: float                # mean of upper-triangle (off-diagonal) values
-    weighted_avg_correlation: Optional[float] = None  # weighted by w_i * w_j on off-diagonal
-    min_pair: Optional[CorrelationPair] = None
-    max_pair: Optional[CorrelationPair] = None
+    weighted_avg_correlation: float | None = None  # weighted by w_i * w_j on off-diagonal
+    min_pair: CorrelationPair | None = None
+    max_pair: CorrelationPair | None = None
     pct_pairs_above_0_7: float            # share of pairs with corr > 0.7
     pct_pairs_below_0_3: float            # share of pairs with corr < 0.3
     diversification_score: float          # 1 - avg_correlation (clamped to [0,1])
@@ -326,13 +327,13 @@ class CorrelationStats(BaseModel):
 
 
 class CorrelationResponse(BaseModel):
-    tickers: List[str]
-    matrix: List[List[float]]             # square matrix, indexed by tickers
+    tickers: list[str]
+    matrix: list[list[float]]             # square matrix, indexed by tickers
     observations: int
     start_date_used: str
     end_date_used: str
     stats: CorrelationStats
-    errors: Dict[str, str] = Field(default_factory=dict)
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class PortfolioHealthStats(BaseModel):
@@ -349,14 +350,14 @@ class PortfolioHealthStats(BaseModel):
 
 
 class PortfolioHealthResponse(BaseModel):
-    tickers: List[str]
-    weights: List[float]
+    tickers: list[str]
+    weights: list[float]
     observations: int
     start_date_used: str
     end_date_used: str
     risk_free_rate: float
     stats: PortfolioHealthStats
-    errors: Dict[str, str] = Field(default_factory=dict)
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class FrontierPoint(BaseModel):
@@ -366,7 +367,7 @@ class FrontierPoint(BaseModel):
 
 
 class PortfolioOnFrontier(BaseModel):
-    weights: Dict[str, float]
+    weights: dict[str, float]
     expected_return: float
     volatility: float
     sharpe: float
@@ -379,25 +380,25 @@ class AssetPoint(BaseModel):
 
 
 class EfficientFrontierResponse(BaseModel):
-    tickers: List[str]
+    tickers: list[str]
     risk_free_rate: float
     observations: int
     start_date_used: str
     end_date_used: str
-    frontier: List[FrontierPoint]
-    assets: List[AssetPoint]
+    frontier: list[FrontierPoint]
+    assets: list[AssetPoint]
     min_variance: PortfolioOnFrontier
     max_sharpe: PortfolioOnFrontier
-    current_portfolio: Optional[PortfolioOnFrontier] = None
-    errors: Dict[str, str] = Field(default_factory=dict)
+    current_portfolio: PortfolioOnFrontier | None = None
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 SamplerOptimization = Literal["max_sharpe", "equal_weight"]
 
 
 class SampledPortfolio(BaseModel):
-    tickers: List[str]
-    weights: List[float]
+    tickers: list[str]
+    weights: list[float]
     expected_return: float
     volatility: float
     sharpe: float
@@ -411,12 +412,12 @@ class SamplerCloudPoint(BaseModel):
     sharpe: float
     avg_correlation: float
     composite_score: float
-    tickers: List[str]
-    weights: List[float]
+    tickers: list[str]
+    weights: list[float]
 
 
 class PortfolioSamplerResponse(BaseModel):
-    universe: List[str]
+    universe: list[str]
     portfolio_size: int
     n_simulations_requested: int
     n_simulations_evaluated: int
@@ -427,14 +428,14 @@ class PortfolioSamplerResponse(BaseModel):
     risk_free_rate: float
     diversification_weight: float
     optimization: SamplerOptimization
-    top_by_composite: List[SampledPortfolio]
-    top_by_sharpe: List[SampledPortfolio]
-    cloud: List[SamplerCloudPoint]
-    errors: Dict[str, str] = Field(default_factory=dict)
+    top_by_composite: list[SampledPortfolio]
+    top_by_sharpe: list[SampledPortfolio]
+    cloud: list[SamplerCloudPoint]
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class PortfolioSamplerRequest(BaseModel):
-    tickers: List[str] = Field(min_length=2, max_length=300)
+    tickers: list[str] = Field(min_length=2, max_length=300)
     portfolio_size: int = Field(default=5, ge=2, le=20)
     n_simulations: int = Field(default=200, ge=10, le=5000)
     top_k: int = Field(default=5, ge=1, le=50)
@@ -449,8 +450,8 @@ class PortfolioSamplerRequest(BaseModel):
 
 
 class EfficientFrontierRequest(BaseModel):
-    tickers: List[str] = Field(min_length=2, max_length=50)
-    weights: Optional[List[float]] = None
+    tickers: list[str] = Field(min_length=2, max_length=50)
+    weights: list[float] | None = None
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
@@ -467,7 +468,7 @@ class BLView(BaseModel):
     # "relative": `asset` expected to outperform `asset_other` by `value` (annualized).
     view_type: BLViewType = "absolute"
     asset: str
-    asset_other: Optional[str] = None
+    asset_other: str | None = None
     value: float                                             # annualized return / spread
     confidence: float = Field(default=0.5, gt=0.0, le=1.0)   # 0..1, higher = view pulls harder
 
@@ -482,28 +483,28 @@ class BLAssetPoint(BaseModel):
 
 
 class BlackLittermanResponse(BaseModel):
-    tickers: List[str]
+    tickers: list[str]
     risk_free_rate: float
     risk_aversion: float
     tau: float
     observations: int
     start_date_used: str
     end_date_used: str
-    assets: List[BLAssetPoint]
-    prior_weights: Dict[str, float]
-    implied_returns: Dict[str, float]
-    posterior_returns: Dict[str, float]
+    assets: list[BLAssetPoint]
+    prior_weights: dict[str, float]
+    implied_returns: dict[str, float]
+    posterior_returns: dict[str, float]
     optimal: PortfolioOnFrontier          # max-Sharpe on posterior returns
     min_variance: PortfolioOnFrontier
     n_views_applied: int
-    warnings: List[str] = Field(default_factory=list)
-    errors: Dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class BlackLittermanRequest(BaseModel):
-    tickers: List[str] = Field(min_length=2, max_length=50)
-    prior_weights: Optional[List[float]] = None             # market / equilibrium weights; default equal
-    views: List[BLView] = Field(default_factory=list)
+    tickers: list[str] = Field(min_length=2, max_length=50)
+    prior_weights: list[float] | None = None             # market / equilibrium weights; default equal
+    views: list[BLView] = Field(default_factory=list)
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
@@ -529,9 +530,9 @@ class PCAComponent(BaseModel):
     variance_contribution_pct: float                # share of portfolio variance
     cumulative_variance_contribution_pct: float
     risk_contribution: float                        # lambda_i * y_i^2 / sigma_p (vol units, sums to sigma_p)
-    loadings: Dict[str, float]                      # ticker -> eigenvector coefficient
-    top_positive: List[str]
-    top_negative: List[str]
+    loadings: dict[str, float]                      # ticker -> eigenvector coefficient
+    top_positive: list[str]
+    top_negative: list[str]
     interpretation: str
 
 
@@ -564,25 +565,25 @@ class PCAStats(BaseModel):
 
 
 class PCARiskResponse(BaseModel):
-    tickers: List[str]
-    weights: List[float]
+    tickers: list[str]
+    weights: list[float]
     matrix_type: PCAMatrixType
     return_mode: ReturnMode
     observations: int
     start_date_used: str
     end_date_used: str
-    covariance: List[List[float]]                   # annualized variance-covariance matrix
-    matrix: List[List[float]]                       # the matrix actually diagonalized
-    components: List[PCAComponent]
-    assets: List[PCAAssetRisk]
+    covariance: list[list[float]]                   # annualized variance-covariance matrix
+    matrix: list[list[float]]                       # the matrix actually diagonalized
+    components: list[PCAComponent]
+    assets: list[PCAAssetRisk]
     stats: PCAStats
-    warnings: List[str] = Field(default_factory=list)
-    errors: Dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class PCARiskRequest(BaseModel):
-    tickers: List[str] = Field(min_length=2, max_length=100)
-    weights: Optional[List[float]] = None           # portfolio weights; default equal
+    tickers: list[str] = Field(min_length=2, max_length=100)
+    weights: list[float] | None = None           # portfolio weights; default equal
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     return_mode: ReturnMode = "log"
@@ -633,7 +634,7 @@ class PortfolioVaREsPoint(BaseModel):
     gaussian_breach_rate: float
     expected_breach_rate: float                     # 1 - confidence_level
 
-    contributions: List[PortfolioVaRContribution]
+    contributions: list[PortfolioVaRContribution]
 
 
 class PortfolioVaREsStats(BaseModel):
@@ -650,8 +651,8 @@ class PortfolioVaREsStats(BaseModel):
 
 
 class PortfolioVaREsResponse(BaseModel):
-    tickers: List[str]
-    weights: List[float]
+    tickers: list[str]
+    weights: list[float]
     lookback_period: str
     return_mode: ReturnMode                         # always "arith" — VaR is a P&L of a linear position
     horizon_days: int
@@ -659,29 +660,29 @@ class PortfolioVaREsResponse(BaseModel):
     start_date_used: str
     end_date_used: str
     price_type: str                                 # "Adjusted Close" or "Close"
-    portfolio_value: Optional[float] = None
+    portfolio_value: float | None = None
     stats: PortfolioVaREsStats
-    points: List[PortfolioVaREsPoint]
-    warnings: List[str] = Field(default_factory=list)
-    errors: Dict[str, str] = Field(default_factory=dict)
+    points: list[PortfolioVaREsPoint]
+    warnings: list[str] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class PortfolioVaREsRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=100)
-    weights: Optional[List[float]] = None           # portfolio weights; default equal
+    tickers: list[str] = Field(min_length=1, max_length=100)
+    weights: list[float] | None = None           # portfolio weights; default equal
     lookback_period: str = "3Y"
     auto_adjust: bool = True
-    confidence_levels: List[float] = Field(default_factory=lambda: [0.95, 0.99])
+    confidence_levels: list[float] = Field(default_factory=lambda: [0.95, 0.99])
     horizon_days: int = Field(default=1, ge=1, le=60)
-    portfolio_value: Optional[float] = Field(default=None, gt=0)
+    portfolio_value: float | None = Field(default=None, gt=0)
 
 
 RegressionFrequency = Literal["daily", "weekly"]
 
 
 class PortfolioRegressionRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=100)
-    weights: List[float] = Field(min_length=1, max_length=100)
+    tickers: list[str] = Field(min_length=1, max_length=100)
+    weights: list[float] = Field(min_length=1, max_length=100)
     benchmark: str = Field(default="URTH", min_length=1, max_length=32)
     lookback_period: str = "3Y"
     auto_adjust: bool = True
@@ -732,44 +733,44 @@ class AssetRegression(BaseModel):
 
 
 class PortfolioRegressionResponse(BaseModel):
-    tickers: List[str]
-    weights: List[float]
+    tickers: list[str]
+    weights: list[float]
     benchmark: str
     frequency: RegressionFrequency
     lookback_period: str
     base_currency: str
-    currencies: Dict[str, str]        # quote currency of each series before conversion
+    currencies: dict[str, str]        # quote currency of each series before conversion
     observations: int
     start_date_used: str
     end_date_used: str
     rolling_window: int
     stats: RegressionStats
-    points: List[RegressionPoint]
-    rolling: List[RollingR2Point]
-    assets: List[AssetRegression]
-    warnings: List[str] = Field(default_factory=list)
-    errors: Dict[str, str] = Field(default_factory=dict)
+    points: list[RegressionPoint]
+    rolling: list[RollingR2Point]
+    assets: list[AssetRegression]
+    warnings: list[str] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
 
 
 class PortfolioHealthRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=100)
-    weights: List[float] = Field(min_length=1, max_length=100)
+    tickers: list[str] = Field(min_length=1, max_length=100)
+    weights: list[float] = Field(min_length=1, max_length=100)
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
 
 
 class CorrelationRequest(BaseModel):
-    tickers: List[str] = Field(min_length=2, max_length=100)
-    weights: Optional[List[float]] = None  # if provided, used for weighted avg correlation
+    tickers: list[str] = Field(min_length=2, max_length=100)
+    weights: list[float] | None = None  # if provided, used for weighted avg correlation
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     return_mode: ReturnMode = "log"
 
 
 class YahooAllMetricsRequest(BaseModel):
-    tickers: List[str] = Field(min_length=1, max_length=200)
-    asof: Optional[str] = None
+    tickers: list[str] = Field(min_length=1, max_length=200)
+    asof: str | None = None
     period: str = "3Y"  # Default to 3 years
     auto_adjust: bool = True
     frequency: VolFrequency = "daily"
@@ -788,7 +789,7 @@ def _nearest_prev_close(close: pd.Series, target_date: pd.Timestamp):
 
 def yahoo_perf_asof(
     ticker: str,
-    asof: Optional[str] = None,
+    asof: str | None = None,
     auto_adjust: bool = True,
 ) -> pd.DataFrame:
     """
@@ -845,7 +846,7 @@ def yahoo_perf_asof(
     return df
 
 
-def df_to_rows(df: pd.DataFrame) -> List[dict]:
+def df_to_rows(df: pd.DataFrame) -> list[dict]:
     rows = []
     for _, r in df.iterrows():
         rows.append({
@@ -863,13 +864,13 @@ def df_to_rows(df: pd.DataFrame) -> List[dict]:
 # =========================================================
 
 def _run_perf(
-    tickers: List[str],
-    asof: Optional[str],
+    tickers: list[str],
+    asof: str | None,
     auto_adjust: bool,
     format: str,
 ):
-    data: List[dict] = []
-    errors: Dict[str, str] = {}
+    data: list[dict] = []
+    errors: dict[str, str] = {}
 
     for ticker in tickers:
         try:
@@ -911,7 +912,7 @@ def _run_perf(
 @router.get("/yahoo/perf", response_model=YahooPerfResponse)
 def yahoo_perf_get(
     tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    asof: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    asof: str | None = Query(None, description="YYYY-MM-DD"),
     auto_adjust: bool = True,
     format: str = Query("json", pattern="^(json|csv)$"),
 ):
@@ -1009,7 +1010,7 @@ def yahoo_arithmetic_return(
     return df
 
 
-def df_to_return_rows(df: pd.DataFrame) -> List[dict]:
+def df_to_return_rows(df: pd.DataFrame) -> list[dict]:
     rows = []
     for _, r in df.iterrows():
         rows.append({
@@ -1026,14 +1027,14 @@ def df_to_return_rows(df: pd.DataFrame) -> List[dict]:
 
 
 def _run_arithmetic_return(
-    tickers: List[str],
+    tickers: list[str],
     start_date: str,
     end_date: str,
     auto_adjust: bool,
     format: str,
 ):
-    data: List[dict] = []
-    errors: Dict[str, str] = {}
+    data: list[dict] = []
+    errors: dict[str, str] = {}
 
     for ticker in tickers:
         try:
@@ -1088,7 +1089,7 @@ def yahoo_arithmetic_return_post(
     return _run_arithmetic_return(req.tickers, req.start_date, req.end_date, req.auto_adjust, format)
 
 def _download_prices_close(
-    tickers: List[str],
+    tickers: list[str],
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
     auto_adjust: bool,
@@ -1140,7 +1141,7 @@ def _download_prices_close(
     return close
 
 
-def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
+def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> tuple[float | None, pd.Timestamp | None]:
     """
     Returns (price, date) for the last available price <= target.
     """
@@ -1156,7 +1157,7 @@ def cumulative_returns_series_from_prices(
     prices: pd.Series,
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp
-) -> Tuple[pd.Timestamp, float, pd.Series]:
+) -> tuple[pd.Timestamp, float, pd.Series]:
     """
     Renvoie (start_used_date, base_price, cum_return_series_decimal)
     cum_return_series est indexé par date, valeurs en décimal (0.10 = +10%).
@@ -1179,7 +1180,7 @@ def cumulative_returns_series_from_prices(
 
 
 def _run_cum_returns(
-    tickers: List[str],
+    tickers: list[str],
     start_date: str,
     end_date: str,
     auto_adjust: bool,
@@ -1197,8 +1198,8 @@ def _run_cum_returns(
     if close_df.empty:
         raise ValueError("No data returned by Yahoo for requested tickers/date range")
 
-    data: List[dict] = []
-    errors: Dict[str, str] = {}
+    data: list[dict] = []
+    errors: dict[str, str] = {}
 
     for ticker in tickers:
         try:
@@ -1277,7 +1278,7 @@ def yahoo_cumulative_returns_post(
 # =========================================================
 
 def _download_close_multi(
-    tickers: List[str],
+    tickers: list[str],
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
     auto_adjust: bool,
@@ -1321,7 +1322,7 @@ def _drawdown_series(prices: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"Price": p, "RunningMax": rm, "Drawdown": dd})
 
 
-def _drawdown_metrics_and_episodes(prices: pd.Series) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def _drawdown_metrics_and_episodes(prices: pd.Series) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     dd_df = _drawdown_series(prices)
     dd = dd_df["Drawdown"]
 
@@ -1335,7 +1336,7 @@ def _drawdown_metrics_and_episodes(prices: pd.Series) -> Tuple[Dict[str, Any], L
     troughs = []
     episodes = []
     for _, block in dd_df[in_dd].groupby(episode_id[in_dd]):
-        durations.append(int(len(block)))
+        durations.append(len(block))
         trough_val = float(block["Drawdown"].min())
         troughs.append(trough_val)
         
@@ -1352,7 +1353,7 @@ def _drawdown_metrics_and_episodes(prices: pd.Series) -> Tuple[Dict[str, Any], L
             "start_date": start_dt.date().isoformat(),
             "trough_date": trough_dt.date().isoformat(),
             "end_date": end_dt.date().isoformat() if recovered else None,
-            "duration_days": int(len(block)),
+            "duration_days": len(block),
             "max_drawdown": trough_val
         })
 
@@ -1360,7 +1361,7 @@ def _drawdown_metrics_and_episodes(prices: pd.Series) -> Tuple[Dict[str, Any], L
         "observations": int(dd.dropna().shape[0]),
         "max_drawdown": max_dd,
         "current_drawdown": current_dd,
-        "num_drawdown_episodes": int(len(durations)),
+        "num_drawdown_episodes": len(durations),
         "avg_drawdown_length_trading_days": float(np.mean(durations)) if durations else 0.0,
         "max_drawdown_length_trading_days": int(max(durations)) if durations else 0,
         "worst_episode_trough": float(min(troughs)) if troughs else 0.0,
@@ -1368,7 +1369,7 @@ def _drawdown_metrics_and_episodes(prices: pd.Series) -> Tuple[Dict[str, Any], L
     return metrics, episodes
 
 
-def _max_drawdown_path(prices: pd.Series) -> Dict[str, Any]:
+def _max_drawdown_path(prices: pd.Series) -> dict[str, Any]:
     dd_df = _drawdown_series(prices)
     p = dd_df["Price"]
     dd = dd_df["Drawdown"]
@@ -1391,7 +1392,7 @@ def _max_drawdown_path(prices: pd.Series) -> Dict[str, Any]:
     }
 
 
-def _serialize_dd_series(dd_df: pd.DataFrame) -> List[Dict[str, Any]]:
+def _serialize_dd_series(dd_df: pd.DataFrame) -> list[dict[str, Any]]:
     out = []
     for idx, row in dd_df.iterrows():
         out.append({
@@ -1404,12 +1405,12 @@ def _serialize_dd_series(dd_df: pd.DataFrame) -> List[Dict[str, Any]]:
 
 
 def _run_drawdown(
-    tickers: List[str],
+    tickers: list[str],
     start_date: str,
     end_date: str,
     auto_adjust: bool,
     include_series: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     start_ts = utils.convert_to_timestamp(start_date)
     end_ts = utils.convert_to_timestamp(end_date)
     if start_ts is None or end_ts is None:
@@ -1426,7 +1427,7 @@ def _run_drawdown(
         raise ValueError("No price data returned by Yahoo")
 
     data = []
-    errors: Dict[str, str] = {}
+    errors: dict[str, str] = {}
 
     for t in tickers:
         try:
@@ -1493,7 +1494,7 @@ def yahoo_drawdowns_post(req: YahooDrawdownRequest):
 
 
 def _download_close_multi_interval(
-    tickers: List[str],
+    tickers: list[str],
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
     auto_adjust: bool,
@@ -1551,7 +1552,7 @@ def _compute_vols(
     end_ts: pd.Timestamp,
     frequency: VolFrequency,
     return_mode: ReturnMode,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     - Find start_used/end_used using nearest previous available price (<= requested dates)
     - Compute returns inside [start_used, end_used]
@@ -1598,13 +1599,13 @@ def _compute_vols(
 
 
 def _run_annualized_volatility(
-    tickers: List[str],
+    tickers: list[str],
     start_date: str,
     end_date: str,
     auto_adjust: bool,
     frequency: VolFrequency,
     return_mode: ReturnMode,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     start_ts = utils.convert_to_timestamp(start_date)
     end_ts = utils.convert_to_timestamp(end_date)
 
@@ -1621,8 +1622,8 @@ def _run_annualized_volatility(
     if close.empty:
         raise ValueError("No price data returned by Yahoo")
 
-    data: List[dict] = []
-    errors: Dict[str, str] = {}
+    data: list[dict] = []
+    errors: dict[str, str] = {}
 
     for t in tickers:
         try:
@@ -1705,7 +1706,7 @@ def yahoo_annualized_volatility_post(req: YahooAnnVolRequest):
 
 
 def _download_close_daily_multi(
-    tickers: List[str],
+    tickers: list[str],
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
     auto_adjust: bool,
@@ -1845,7 +1846,7 @@ def es_cf_empirical_tail(returns: pd.Series, alpha: float) -> float:
     tail = r[r <= threshold_return]
     return float(-np.mean(tail)) if tail.size else 0.0
 
-def es_summary(returns: pd.Series, confidence_levels: List[float]) -> List[Dict[str, Any]]:
+def es_summary(returns: pd.Series, confidence_levels: list[float]) -> list[dict[str, Any]]:
     out = []
     for alpha in confidence_levels:
         out.append({
@@ -1864,13 +1865,13 @@ def es_summary(returns: pd.Series, confidence_levels: List[float]) -> List[Dict[
 # =========================
 
 def _run_var_es(
-    tickers: List[str],
+    tickers: list[str],
     start_date: str,
     end_date: str,
     auto_adjust: bool,
     return_mode: ReturnMode,
-    confidence_levels: List[float],
-) -> Dict[str, Any]:
+    confidence_levels: list[float],
+) -> dict[str, Any]:
     start_ts = utils.convert_to_timestamp(start_date)
     end_ts = utils.convert_to_timestamp(end_date)
     if start_ts is None or end_ts is None:
@@ -1893,8 +1894,8 @@ def _run_var_es(
     if close.empty:
         raise ValueError("No price data returned by Yahoo")
 
-    data: List[dict] = []
-    errors: Dict[str, str] = {}
+    data: list[dict] = []
+    errors: dict[str, str] = {}
 
     for t in tickers:
         try:
@@ -1935,7 +1936,7 @@ def _run_var_es(
                 "end_date_requested": end_ts.date().isoformat(),
                 "start_date_used": start_used.date().isoformat(),
                 "end_date_used": end_used.date().isoformat(),
-                "observations": int(len(returns)),
+                "observations": len(returns),
                 "return_mode": return_mode,
                 "horizon": "1D",
                 "price_type": "Adjusted Close" if auto_adjust else "Close",
@@ -2074,7 +2075,7 @@ def yahoo_all_metrics_post(req: YahooAllMetricsRequest):
 # Monte Carlo simulation
 # =========================
 
-def _business_dates_forward(start: pd.Timestamp, n_steps: int) -> List[str]:
+def _business_dates_forward(start: pd.Timestamp, n_steps: int) -> list[str]:
     """Returns n_steps+1 business-day dates starting from `start` inclusive."""
     idx = pd.bdate_range(start=start, periods=n_steps + 1)
     return [d.date().isoformat() for d in idx]
@@ -2126,8 +2127,8 @@ def _simulate_gbm_paths(
 
 
 def _run_monte_carlo(
-    tickers: List[str],
-    weights: List[float],
+    tickers: list[str],
+    weights: list[float],
     horizon_days: int,
     n_simulations: int,
     lookback_period: str,
@@ -2135,7 +2136,7 @@ def _run_monte_carlo(
     seed: int,
     n_sample_paths: int,
     initial_value: float,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) != len(weights):
         raise ValueError("tickers and weights must have the same length")
 
@@ -2173,7 +2174,7 @@ def _run_monte_carlo(
 
     # Keep tickers that actually downloaded; drop weight components for missing tickers
     available = [t for t in tickers if t in close.columns]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     if not available:
         raise ValueError("No tickers available in downloaded data")
@@ -2272,7 +2273,7 @@ def yahoo_monte_carlo_post(req: MonteCarloRequest):
             initial_value=req.initial_value,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =========================
@@ -2280,12 +2281,12 @@ def yahoo_monte_carlo_post(req: MonteCarloRequest):
 # =========================
 
 def _run_correlation(
-    tickers: List[str],
-    weights: Optional[List[float]],
+    tickers: list[str],
+    weights: list[float] | None,
     lookback_period: str,
     auto_adjust: bool,
     return_mode: ReturnMode,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) < 2:
         raise ValueError("At least 2 tickers are required to compute a correlation matrix")
 
@@ -2293,7 +2294,7 @@ def _run_correlation(
     end_ts = pd.Timestamp.now().normalize()
     start_ts = end_ts - pd.Timedelta(days=days)
 
-    norm_weights: Optional[np.ndarray] = None
+    norm_weights: np.ndarray | None = None
     if weights is not None:
         if len(weights) != len(tickers):
             raise ValueError("weights length must match tickers length")
@@ -2321,7 +2322,7 @@ def _run_correlation(
         raise ValueError("No price data returned by Yahoo")
 
     available = [t for t in tickers if t in close.columns]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     if len(available) < 2:
         raise ValueError("Need at least 2 tickers with price data to compute correlations")
@@ -2354,7 +2355,7 @@ def _run_correlation(
 
     avg_corr = float(np.nanmean(off_diag)) if off_diag.size else 0.0
 
-    weighted_avg: Optional[float] = None
+    weighted_avg: float | None = None
     if norm_weights is not None and norm_weights.size == n:
         # Weighted off-diagonal mean: sum_{i<j} 2*w_i*w_j*rho_ij / sum_{i<j} 2*w_i*w_j
         ww = np.outer(norm_weights, norm_weights)
@@ -2362,8 +2363,8 @@ def _run_correlation(
         den = float(np.nansum(ww[iu]))
         weighted_avg = float(num / den) if den > 0 else None
 
-    min_pair_obj: Optional[Dict[str, Any]] = None
-    max_pair_obj: Optional[Dict[str, Any]] = None
+    min_pair_obj: dict[str, Any] | None = None
+    max_pair_obj: dict[str, Any] | None = None
     if off_diag.size:
         flat_idx_min = int(np.nanargmin(off_diag))
         flat_idx_max = int(np.nanargmax(off_diag))
@@ -2388,7 +2389,7 @@ def _run_correlation(
     out = {
         "tickers": available,
         "matrix": [[float(v) for v in row] for row in corr_vals],
-        "observations": int(len(rets)),
+        "observations": len(rets),
         "start_date_used": rets.index[0].date().isoformat(),
         "end_date_used": rets.index[-1].date().isoformat(),
         "stats": {
@@ -2418,7 +2419,7 @@ def yahoo_correlation_post(req: CorrelationRequest):
             return_mode=req.return_mode,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =========================
@@ -2426,12 +2427,12 @@ def yahoo_correlation_post(req: CorrelationRequest):
 # =========================
 
 def _run_portfolio_health(
-    tickers: List[str],
-    weights: List[float],
+    tickers: list[str],
+    weights: list[float],
     lookback_period: str,
     auto_adjust: bool,
     risk_free_rate: float,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) != len(weights):
         raise ValueError("tickers and weights must have the same length")
 
@@ -2464,7 +2465,7 @@ def _run_portfolio_health(
         raise ValueError("No price data returned by Yahoo")
 
     available = [t for t in tickers if t in close.columns]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     if not available:
         raise ValueError("No tickers available in downloaded data")
@@ -2527,7 +2528,7 @@ def _run_portfolio_health(
     out = {
         "tickers": available,
         "weights": w_kept.tolist(),
-        "observations": int(len(port_rets)),
+        "observations": len(port_rets),
         "start_date_used": asset_rets.index[0].date().isoformat(),
         "end_date_used": asset_rets.index[-1].date().isoformat(),
         "risk_free_rate": float(risk_free_rate),
@@ -2560,14 +2561,14 @@ def yahoo_portfolio_health_post(req: PortfolioHealthRequest):
             risk_free_rate=req.risk_free_rate,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =========================
 # Markowitz efficient frontier
 # =========================
 
-def _portfolio_perf(weights: np.ndarray, mu: np.ndarray, cov: np.ndarray) -> Tuple[float, float]:
+def _portfolio_perf(weights: np.ndarray, mu: np.ndarray, cov: np.ndarray) -> tuple[float, float]:
     """Return (expected_return, volatility), both annualized."""
     ret = float(np.dot(weights, mu))
     var = float(weights @ cov @ weights)
@@ -2579,7 +2580,7 @@ def _min_variance_for_target(
     target_return: float,
     mu: np.ndarray,
     cov: np.ndarray,
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     n = len(mu)
     w0 = np.full(n, 1.0 / n)
     bounds = [(0.0, 1.0)] * n
@@ -2643,11 +2644,11 @@ def _max_sharpe_portfolio(mu: np.ndarray, cov: np.ndarray, rf: float) -> np.ndar
 
 def _build_portfolio_descriptor(
     w: np.ndarray,
-    tickers: List[str],
+    tickers: list[str],
     mu: np.ndarray,
     cov: np.ndarray,
     rf: float,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     ret, vol = _portfolio_perf(w, mu, cov)
     sharpe = ((ret - rf) / vol) if vol > 0 else 0.0
     return {
@@ -2659,13 +2660,13 @@ def _build_portfolio_descriptor(
 
 
 def _run_efficient_frontier(
-    tickers: List[str],
-    weights: Optional[List[float]],
+    tickers: list[str],
+    weights: list[float] | None,
     lookback_period: str,
     auto_adjust: bool,
     risk_free_rate: float,
     n_points: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) < 2:
         raise ValueError("At least 2 tickers are required to compute an efficient frontier")
 
@@ -2673,7 +2674,7 @@ def _run_efficient_frontier(
     end_ts = pd.Timestamp.now().normalize()
     start_ts = end_ts - pd.Timedelta(days=days)
 
-    current_w_arr: Optional[np.ndarray] = None
+    current_w_arr: np.ndarray | None = None
     if weights is not None:
         if len(weights) != len(tickers):
             raise ValueError("weights length must match tickers length")
@@ -2702,13 +2703,13 @@ def _run_efficient_frontier(
         raise ValueError("No price data returned by Yahoo")
 
     available = [t for t in tickers if t in close.columns]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     if len(available) < 2:
         raise ValueError("Need at least 2 tickers with price data for the frontier")
 
     # Re-align current weights to available tickers (renormalize) if provided
-    current_w_aligned: Optional[np.ndarray] = None
+    current_w_aligned: np.ndarray | None = None
     if current_w_arr is not None:
         keep_mask = np.array([t in close.columns for t in tickers])
         w_kept = current_w_arr[keep_mask]
@@ -2745,7 +2746,7 @@ def _run_efficient_frontier(
     else:
         targets = np.linspace(r_min, r_max, int(n_points))
 
-    frontier_points: List[Dict[str, float]] = []
+    frontier_points: list[dict[str, float]] = []
     for t in targets:
         w_opt = _min_variance_for_target(float(t), mu, cov)
         if w_opt is None:
@@ -2759,7 +2760,7 @@ def _run_efficient_frontier(
         })
 
     # Individual assets
-    asset_points: List[Dict[str, Any]] = []
+    asset_points: list[dict[str, Any]] = []
     for i, t in enumerate(available):
         sigma_i = float(np.sqrt(max(cov[i, i], 0.0)))
         asset_points.append({
@@ -2768,14 +2769,14 @@ def _run_efficient_frontier(
             "volatility": sigma_i,
         })
 
-    current_desc: Optional[Dict[str, Any]] = None
+    current_desc: dict[str, Any] | None = None
     if current_w_aligned is not None and current_w_aligned.size == len(available):
         current_desc = _build_portfolio_descriptor(current_w_aligned, available, mu, cov, rf)
 
     out = {
         "tickers": available,
         "risk_free_rate": rf,
-        "observations": int(len(log_rets)),
+        "observations": len(log_rets),
         "start_date_used": log_rets.index[0].date().isoformat(),
         "end_date_used": log_rets.index[-1].date().isoformat(),
         "frontier": frontier_points,
@@ -2801,7 +2802,7 @@ def yahoo_efficient_frontier_post(req: EfficientFrontierRequest):
             n_points=req.n_points,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =========================
@@ -2813,7 +2814,7 @@ def _optimize_with_bounds(
     n: int,
     max_weight: float = 1.0,
     min_weight: float = 0.0,
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     """Long-only, fully-invested optimizer with min/max weight per asset.
 
     Clamps bounds so a feasible sum(w)=1 always exists (n*lo <= 1 <= n*cap).
@@ -2841,10 +2842,10 @@ def _black_litterman_posterior(
     rf: float,
     risk_aversion: float,
     tau: float,
-    P: Optional[np.ndarray],
-    Q: Optional[np.ndarray],
-    confidences: Optional[np.ndarray],
-) -> Tuple[np.ndarray, np.ndarray]:
+    P: np.ndarray | None,
+    Q: np.ndarray | None,
+    confidences: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return (implied_returns, posterior_returns), both annualized total returns.
 
     Implied (equilibrium) returns: Pi = rf + delta * cov @ w_mkt.
@@ -2877,9 +2878,9 @@ def _black_litterman_posterior(
 
 
 def _run_black_litterman(
-    tickers: List[str],
-    prior_weights: Optional[List[float]],
-    views: List[Any],
+    tickers: list[str],
+    prior_weights: list[float] | None,
+    views: list[Any],
     lookback_period: str,
     auto_adjust: bool,
     risk_free_rate: float,
@@ -2887,7 +2888,7 @@ def _run_black_litterman(
     tau: float,
     max_weight: float,
     min_weight: float,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) < 2:
         raise ValueError("At least 2 tickers are required for the Black-Litterman model")
 
@@ -2896,7 +2897,7 @@ def _run_black_litterman(
     start_ts = end_ts - pd.Timedelta(days=days)
 
     # Normalize prior (market) weights aligned to the input ticker order.
-    prior_arr: Optional[np.ndarray] = None
+    prior_arr: np.ndarray | None = None
     if prior_weights is not None:
         if len(prior_weights) != len(tickers):
             raise ValueError("prior_weights length must match tickers length")
@@ -2912,7 +2913,7 @@ def _run_black_litterman(
         raise ValueError("No price data returned by Yahoo")
 
     available = [t for t in tickers if t in close.columns]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     if len(available) < 2:
         raise ValueError("Need at least 2 tickers with price data for Black-Litterman")
@@ -2941,10 +2942,10 @@ def _run_black_litterman(
     idx = {t: i for i, t in enumerate(available)}
 
     # Build the picking matrix P and view vector Q from the user's views.
-    rows: List[np.ndarray] = []
-    q_vals: List[float] = []
-    conf_vals: List[float] = []
-    warnings: List[str] = []
+    rows: list[np.ndarray] = []
+    q_vals: list[float] = []
+    conf_vals: list[float] = []
+    warnings: list[str] = []
     for v in views:
         vtype = getattr(v, "view_type", "absolute")
         asset = getattr(v, "asset", None)
@@ -2965,7 +2966,7 @@ def _run_black_litterman(
         else:
             row[idx[asset]] = 1.0
         rows.append(row)
-        q_vals.append(float(getattr(v, "value")))
+        q_vals.append(float(v.value))
         conf_vals.append(float(getattr(v, "confidence", 0.5)))
 
     if rows:
@@ -3003,7 +3004,7 @@ def _run_black_litterman(
     optimal_desc = _build_portfolio_descriptor(w_opt, available, posterior, cov, rf)
     minvar_desc = _build_portfolio_descriptor(w_minvar, available, posterior, cov, rf)
 
-    asset_points: List[Dict[str, Any]] = []
+    asset_points: list[dict[str, Any]] = []
     for i, t in enumerate(available):
         asset_points.append({
             "ticker": t,
@@ -3019,7 +3020,7 @@ def _run_black_litterman(
         "risk_free_rate": rf,
         "risk_aversion": float(risk_aversion),
         "tau": float(tau),
-        "observations": int(len(log_rets)),
+        "observations": len(log_rets),
         "start_date_used": log_rets.index[0].date().isoformat(),
         "end_date_used": log_rets.index[-1].date().isoformat(),
         "assets": asset_points,
@@ -3067,7 +3068,7 @@ def yahoo_black_litterman_post(req: BlackLittermanRequest):
             min_weight=req.min_weight,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     BL_CACHE[cache_key] = out
     return out
 
@@ -3092,7 +3093,7 @@ def _optimize_subset(
     mode: str,
     max_weight: float = 1.0,
     min_weight: float = 0.0,
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     n = len(mu_sub)
     if mode == "equal_weight":
         return np.full(n, 1.0 / n)
@@ -3119,7 +3120,7 @@ def _optimize_subset(
 
 
 def _run_portfolio_sampler(
-    tickers: List[str],
+    tickers: list[str],
     portfolio_size: int,
     n_simulations: int,
     top_k: int,
@@ -3131,10 +3132,10 @@ def _run_portfolio_sampler(
     min_weight: float,
     optimization: str,
     seed: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # de-dup tickers while preserving order
     seen: set = set()
-    uniq_tickers: List[str] = []
+    uniq_tickers: list[str] = []
     for t in tickers:
         if t and t not in seen:
             seen.add(t)
@@ -3173,7 +3174,7 @@ def _run_portfolio_sampler(
         raise ValueError("No price data returned by Yahoo")
 
     available = [t for t in uniq_tickers if t in close.columns]
-    errors: Dict[str, str] = {
+    errors: dict[str, str] = {
         t: "Ticker not found in downloaded data"
         for t in uniq_tickers if t not in close.columns
     }
@@ -3203,8 +3204,8 @@ def _run_portfolio_sampler(
     n_universe = len(valid_tickers)
 
     drawn_combos: set = set()
-    cloud: List[Dict[str, float]] = []
-    portfolios: List[Dict[str, Any]] = []
+    cloud: list[dict[str, float]] = []
+    portfolios: list[dict[str, Any]] = []
     n_failed = 0
 
     # Hard ceiling on draws to avoid infinite loops if dedup keeps colliding
@@ -3272,7 +3273,7 @@ def _run_portfolio_sampler(
         "universe": valid_tickers,
         "portfolio_size": int(portfolio_size),
         "n_simulations_requested": int(n_simulations),
-        "n_simulations_evaluated": int(len(portfolios)),
+        "n_simulations_evaluated": len(portfolios),
         "n_simulations_failed": int(n_failed),
         "observations": int(log_rets_full.dropna(how="any").shape[0]),
         "start_date_used": prices_full.dropna(how="all").index[0].date().isoformat(),
@@ -3307,7 +3308,7 @@ def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest):
             seed=req.seed,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =========================
@@ -3344,8 +3345,8 @@ def _pc_interpretation(
     vec: np.ndarray,
     explained_ratio: float,
     contribution_pct: float,
-    top_pos: List[str],
-    top_neg: List[str],
+    top_pos: list[str],
+    top_neg: list[str],
     index: int,
 ) -> str:
     n_pos = int(np.sum(vec > 1e-6))
@@ -3379,15 +3380,15 @@ def _pc_interpretation(
 
 
 def _run_pca_risk(
-    tickers: List[str],
-    weights: Optional[List[float]],
+    tickers: list[str],
+    weights: list[float] | None,
     lookback_period: str,
     auto_adjust: bool,
     return_mode: ReturnMode,
     matrix_type: PCAMatrixType,
     n_components: int,
     top_loadings: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) < 2:
         raise ValueError("At least 2 tickers are required to run a PCA risk decomposition")
 
@@ -3395,7 +3396,7 @@ def _run_pca_risk(
     end_ts = pd.Timestamp.now().normalize()
     start_ts = end_ts - pd.Timedelta(days=days)
 
-    w_in: Optional[np.ndarray] = None
+    w_in: np.ndarray | None = None
     if weights is not None:
         if len(weights) != len(tickers):
             raise ValueError("weights length must match tickers length")
@@ -3426,7 +3427,7 @@ def _run_pca_risk(
         raise ValueError("No price data returned by Yahoo")
 
     available = [t for t in tickers if t in close.columns]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     if len(available) < 2:
         raise ValueError("Need at least 2 tickers with price data to run a PCA")
@@ -3453,7 +3454,7 @@ def _run_pca_risk(
         raise ValueError("Not enough return observations to run a PCA")
 
     n = len(available)
-    warnings: List[str] = []
+    warnings: list[str] = []
     if len(rets) < n:
         warnings.append(
             f"Only {len(rets)} observations for {n} assets — the covariance matrix is singular, "
@@ -3517,8 +3518,8 @@ def _run_pca_risk(
     condition_number = float(pos_eig[0] / pos_eig[-1]) if pos_eig.size >= 2 else 1.0
 
     k = min(int(n_components), n)
-    components: List[Dict[str, Any]] = []
-    normalized_vecs: List[np.ndarray] = []
+    components: list[dict[str, Any]] = []
+    normalized_vecs: list[np.ndarray] = []
     for i in range(n):
         vec = _pc_sign_normalized(eigvecs[:, i].copy())
         normalized_vecs.append(vec)
@@ -3573,7 +3574,7 @@ def _run_pca_risk(
     per_asset_pc_var = (loading_matrix ** 2) * eigvals[np.newaxis, :]
     top_component = np.argmax(per_asset_pc_var, axis=1) + 1
 
-    assets: List[Dict[str, Any]] = []
+    assets: list[dict[str, Any]] = []
     for j, t in enumerate(available):
         assets.append({
             "ticker": t,
@@ -3595,7 +3596,7 @@ def _run_pca_risk(
         "weights": [float(x) for x in w.tolist()],
         "matrix_type": matrix_type,
         "return_mode": return_mode,
-        "observations": int(len(rets)),
+        "observations": len(rets),
         "start_date_used": rets.index[0].date().isoformat(),
         "end_date_used": rets.index[-1].date().isoformat(),
         "covariance": [[float(v) for v in row] for row in cov],
@@ -3638,7 +3639,7 @@ def yahoo_pca_risk_post(req: PCARiskRequest):
             top_loadings=req.top_loadings,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 # =========================
 # Portfolio VaR / ES
@@ -3659,14 +3660,14 @@ def _overlapping_horizon_returns(rets: np.ndarray, horizon: int) -> np.ndarray:
 
 
 def _run_portfolio_var_es(
-    tickers: List[str],
-    weights: Optional[List[float]],
+    tickers: list[str],
+    weights: list[float] | None,
     lookback_period: str,
     auto_adjust: bool,
-    confidence_levels: List[float],
+    confidence_levels: list[float],
     horizon_days: int,
-    portfolio_value: Optional[float],
-) -> Dict[str, Any]:
+    portfolio_value: float | None,
+) -> dict[str, Any]:
     if not tickers:
         raise ValueError("At least one ticker is required")
 
@@ -3674,7 +3675,7 @@ def _run_portfolio_var_es(
     if horizon < 1:
         raise ValueError("horizon_days must be >= 1")
 
-    cls: List[float] = []
+    cls: list[float] = []
     for a in confidence_levels:
         if not (0.5 < float(a) < 1.0):
             raise ValueError("confidence_levels must be in (0.5, 1.0)")
@@ -3683,7 +3684,7 @@ def _run_portfolio_var_es(
         raise ValueError("At least one confidence level is required")
     cls = sorted(set(cls))
 
-    w_in: Optional[np.ndarray] = None
+    w_in: np.ndarray | None = None
     if weights is not None:
         if len(weights) != len(tickers):
             raise ValueError("weights length must match tickers length")
@@ -3716,7 +3717,7 @@ def _run_portfolio_var_es(
     if close.empty:
         raise ValueError("No price data returned by Yahoo")
 
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data"
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data"
                               for t in tickers if t not in close.columns}
     # Yahoo hands back an all-NaN column for a symbol it does not know: drop it instead
     # of letting it wipe the overlapping window for every other holding.
@@ -3763,8 +3764,8 @@ def _run_portfolio_var_es(
     port = horizon_rets @ w                                  # exactly additive in the assets
     port_series = pd.Series(port, index=horizon_index)
 
-    warnings: List[str] = []
-    n_obs = int(len(port))
+    warnings: list[str] = []
+    n_obs = len(port)
     if horizon > 1:
         warnings.append(
             f"Overlapping {horizon}-day windows: {n_obs} observations carry only "
@@ -3799,7 +3800,7 @@ def _run_portfolio_var_es(
 
     pv = float(portfolio_value) if portfolio_value else 0.0
 
-    points: List[Dict[str, Any]] = []
+    points: list[dict[str, Any]] = []
     for alpha in cls:
         summary = es_summary(port_series, [alpha])[0]
 
@@ -3814,7 +3815,7 @@ def _run_portfolio_var_es(
         es_hist = summary["es_historical"]
         var_gauss = summary["var_gaussian"]
 
-        contributions: List[Dict[str, Any]] = []
+        contributions: list[dict[str, Any]] = []
         undiversified = 0.0
         for i, t in enumerate(available):
             standalone = var_historical(pd.Series(horizon_rets[:, i]), alpha)
@@ -3911,7 +3912,7 @@ def yahoo_portfolio_var_es_post(req: PortfolioVaREsRequest):
             portfolio_value=req.portfolio_value,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =========================
@@ -3926,7 +3927,7 @@ _REGRESSION_ROLLING_WINDOW = {"daily": 63, "weekly": 26}  # ~ one quarter / half
 _MINOR_CURRENCY_UNITS = {"GBp": ("GBP", 0.01), "GBX": ("GBP", 0.01), "ZAc": ("ZAR", 0.01), "ILA": ("ILS", 0.01)}
 
 
-def _ticker_currency(ticker: str) -> Optional[str]:
+def _ticker_currency(ticker: str) -> str | None:
     """Quote currency reported by Yahoo (may be a minor unit such as 'GBp')."""
     if ticker in CURRENCY_CACHE:
         return CURRENCY_CACHE[ticker]
@@ -3944,15 +3945,15 @@ def _convert_close_to_base(
     base_currency: str,
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
-) -> Tuple[pd.DataFrame, Dict[str, str], List[str]]:
+) -> tuple[pd.DataFrame, dict[str, str], list[str]]:
     """
     Express every price series of `close` in `base_currency`, using Yahoo FX
     closes ('USDEUR=X' = EUR per 1 USD), forward-filled onto the price dates.
     Returns the converted prices, the quote currency of each ticker and warnings.
     """
-    currencies: Dict[str, str] = {}
-    warnings: List[str] = []
-    factors: Dict[str, Tuple[str, float]] = {}
+    currencies: dict[str, str] = {}
+    warnings: list[str] = []
+    factors: dict[str, tuple[str, float]] = {}
 
     for ticker in close.columns:
         quote = _ticker_currency(ticker)
@@ -3983,7 +3984,7 @@ def _convert_close_to_base(
     return converted, currencies, warnings
 
 
-def _ols_simple(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+def _ols_simple(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
     """OLS of y = alpha + beta * x + e, with classical standard errors."""
     n = len(x)
     x_mean, y_mean = float(np.mean(x)), float(np.mean(y))
@@ -4016,14 +4017,14 @@ def _ols_simple(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
 
 
 def _run_portfolio_regression(
-    tickers: List[str],
-    weights: List[float],
+    tickers: list[str],
+    weights: list[float],
     benchmark: str,
     lookback_period: str,
     auto_adjust: bool,
     frequency: str,
     base_currency: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if len(tickers) != len(weights):
         raise ValueError("tickers and weights must have the same length")
 
@@ -4057,7 +4058,7 @@ def _run_portfolio_regression(
     if cache_key in REGRESSION_CACHE:
         return REGRESSION_CACHE[cache_key]
 
-    download = list(dict.fromkeys(tickers + [benchmark]))
+    download = list(dict.fromkeys([*tickers, benchmark]))
     close = _download_close_daily_multi(download, start_ts, end_ts, auto_adjust)
     if close.empty:
         raise ValueError("No price data returned by Yahoo")
@@ -4065,7 +4066,7 @@ def _run_portfolio_regression(
         raise ValueError(f"Benchmark '{benchmark}' not found on Yahoo Finance")
 
     available = [t for t in tickers if t in close.columns and not close[t].dropna().empty]
-    errors: Dict[str, str] = {t: "Ticker not found in downloaded data" for t in tickers if t not in available}
+    errors: dict[str, str] = {t: "Ticker not found in downloaded data" for t in tickers if t not in available}
     if not available:
         raise ValueError("No tickers available in downloaded data")
 
@@ -4075,7 +4076,7 @@ def _run_portfolio_regression(
 
     # Same currency on both sides, otherwise FX moves end up in the residual and depress R²
     prices, currencies, warnings = _convert_close_to_base(
-        close[list(dict.fromkeys(available + [benchmark]))], base_currency, start_ts, end_ts
+        close[list(dict.fromkeys([*available, benchmark]))], base_currency, start_ts, end_ts
     )
     prices = prices.dropna(how="any")
     if frequency == "weekly":
@@ -4132,7 +4133,7 @@ def _run_portfolio_regression(
         "lookback_period": lookback_period,
         "base_currency": base_currency,
         "currencies": currencies,
-        "observations": int(len(rets)),
+        "observations": len(rets),
         "start_date_used": rets.index[0].date().isoformat(),
         "end_date_used": rets.index[-1].date().isoformat(),
         "rolling_window": window,
@@ -4182,4 +4183,4 @@ def yahoo_portfolio_regression_post(req: PortfolioRegressionRequest):
             base_currency=req.base_currency,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e

@@ -1,9 +1,11 @@
 import datetime
 import enum
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Date, Float, Enum, UniqueConstraint, Index
-from sqlalchemy.orm import Mapped, relationship, DeclarativeBase, mapped_column
+
+from sqlalchemy import Date, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from backend.api.database import engine
+
 
 class Base(DeclarativeBase):
     pass

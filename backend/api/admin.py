@@ -1,10 +1,8 @@
-from typing import List
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from backend.api import schema, model
+from sqlalchemy.orm import Session
 
-from backend.api import schema
+from backend.api import model, schema
 from backend.api.database import get_db
 
 router = APIRouter(prefix='/admin', tags=['ADMIN'])
@@ -128,7 +126,7 @@ def get_portfolio(
             detail=str(e)
         ) from e
 
-@router.get("/portfolios", response_model=List[schema.PortfolioRead])
+@router.get("/portfolios", response_model=list[schema.PortfolioRead])
 def get_all_portfolios(
         db: Session = Depends(get_db)
 ):

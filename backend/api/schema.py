@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field, model_validator
-from enum import Enum, IntEnum
 from datetime import date
-from typing import List, Optional
+from enum import Enum, IntEnum
+
+from pydantic import BaseModel, Field, model_validator
+
 
 class PriorityEnum(IntEnum):
     LOW = 3
@@ -93,4 +94,4 @@ class PositionViewResponse(BaseModel):
     total_pnl: float
     total_fees: float
     estimated_ter_cost_annual: float
-    rows: List[PositionViewRow]
+    rows: list[PositionViewRow]

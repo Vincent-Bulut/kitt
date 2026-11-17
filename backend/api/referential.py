@@ -1,20 +1,19 @@
 import os
-import requests
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import JSONResponse, Response
-from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-from backend.api import schema, model
-from sqlalchemy.dialects.postgresql import insert
-import pandas as pd
 from io import BytesIO
-import numpy as np
-from sqlalchemy import func
-from typing import Any, Dict, List, Optional
 
-from backend.api import schema
+import numpy as np
+import pandas as pd
+import requests
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from backend.api import model
 from backend.api.database import get_db
-from backend.api.pea import scrape_pea_etfs, to_csv, find_new_isins
+from backend.api.pea import find_new_isins, scrape_pea_etfs, to_csv
 
 router = APIRouter(prefix='/referential', tags=['REFERENTIAL'])
 
@@ -35,7 +34,7 @@ def download_pea_etfs():
     try:
         etfs = scrape_pea_etfs()
     except (requests.RequestException, RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}") from e
 
     return Response(
         content=to_csv(etfs).encode("utf-8-sig"),
@@ -52,7 +51,7 @@ def check_new_pea_isins(db: Session = Depends(get_db)):
     try:
         etfs = scrape_pea_etfs()
     except (requests.RequestException, RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}") from e
 
     try:
         known_isins = {
@@ -61,7 +60,7 @@ def check_new_pea_isins(db: Session = Depends(get_db)):
             if isin
         }
     except SQLAlchemyError as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e
 
     new_etfs = find_new_isins(etfs, known_isins)
 
@@ -82,7 +81,7 @@ def list_assets(db: Session = Depends(get_db)):
         assets = db.query(model.Assets).all()
         return assets
     except SQLAlchemyError as e:
-        raise HTTPException(status_code=500, detail=f"Erreur de base de données : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erreur de base de données : {e!s}") from e
 
 @router.post("/upload-excel")
 def upload_referential_excel(
@@ -98,12 +97,12 @@ def upload_referential_excel(
         if not content:
             raise HTTPException(status_code=400, detail="Empty file.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read uploaded file: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read uploaded file: {e}") from e
 
     try:
         df = pd.read_excel(BytesIO(content))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid Excel file: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid Excel file: {e}") from e
 
     df.columns = [c.strip().lower() for c in df.columns]
 
@@ -123,7 +122,7 @@ def upload_referential_excel(
     }
     present_cols = [c for c in df.columns if c in allowed_cols]
     if "symbol" not in present_cols:
-        present_cols = ["symbol"] + present_cols
+        present_cols = ["symbol", *present_cols]
 
     # ✅ fees: cast en float
     if "fees" in df.columns:
@@ -156,4 +155,4 @@ def upload_referential_excel(
 
     except SQLAlchemyError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e

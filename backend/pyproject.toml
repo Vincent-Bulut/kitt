@@ -24,3 +24,24 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+ignore = [
+    "E501",  # long lines are handled by the formatter
+    "B008",    # FastAPI dependencies (Depends/Query/File) in defaults are idiomatic
+    "B905",    # zip() strictness is decided case by case
+    "RUF001",  # French typography (’) in strings
+    "RUF003",  # French typography (’) in comments
+    "UP042",   # keep (str, Enum): str() of members is relied upon
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]

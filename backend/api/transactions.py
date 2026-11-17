@@ -1,11 +1,10 @@
-from typing import List, Dict, Tuple
 from datetime import date as date_type
 
 import pandas as pd
 import yfinance as yf
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from backend.api import model, schema
 from backend.api.database import get_db
@@ -61,7 +60,7 @@ def create_transaction(
 
 @router.get(
     "/portfolios/{portfolio_id}/transactions",
-    response_model=List[schema.TransactionRead],
+    response_model=list[schema.TransactionRead],
 )
 def list_transactions(portfolio_id: int, db: Session = Depends(get_db)):
     portfolio = db.get(model.Portfolio, portfolio_id)
@@ -97,14 +96,14 @@ def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
 # Position view (computed)
 # =============================================================
 
-def _fetch_last_prices(symbols: List[str]) -> Tuple[Dict[str, float], Dict[str, str], date_type | None]:
+def _fetch_last_prices(symbols: list[str]) -> tuple[dict[str, float], dict[str, str], date_type | None]:
     """Return (prices, errors, asof_used).
 
     Uses yfinance.download for a multi-ticker single call. Picks the most
     recent non-NaN close for each symbol.
     """
-    prices: Dict[str, float] = {}
-    errors: Dict[str, str] = {}
+    prices: dict[str, float] = {}
+    errors: dict[str, str] = {}
     asof_used: date_type | None = None
 
     if not symbols:
@@ -130,7 +129,7 @@ def _fetch_last_prices(symbols: List[str]) -> Tuple[Dict[str, float], Dict[str, 
             errors[s] = "No price data returned by yfinance"
         return prices, errors, asof_used
 
-    def _pick_close(close_data: pd.Series | pd.DataFrame) -> Tuple[float | None, date_type | None]:
+    def _pick_close(close_data: pd.Series | pd.DataFrame) -> tuple[float | None, date_type | None]:
         if isinstance(close_data, pd.DataFrame):
             if close_data.empty:
                 return None, None
@@ -185,7 +184,7 @@ def _fetch_last_prices(symbols: List[str]) -> Tuple[Dict[str, float], Dict[str, 
     return prices, errors, asof_used
 
 
-def _compute_position(transactions: List[model.Transaction]) -> dict:
+def _compute_position(transactions: list[model.Transaction]) -> dict:
     """Weighted Average Cost (WAC) accumulator for a single (portfolio, symbol).
 
     Returns: dict with current_qty, cost_basis, avg_cost, realized_pnl, total_fees, num_transactions.
@@ -268,14 +267,14 @@ def get_positions_view(portfolio_id: int, db: Session = Depends(get_db)):
             rows=[],
         )
 
-    by_symbol: Dict[str, List[model.Transaction]] = {}
+    by_symbol: dict[str, list[model.Transaction]] = {}
     for tx in txs:
         by_symbol.setdefault(tx.symbol, []).append(tx)
 
     symbols = list(by_symbol.keys())
     prices, price_errors, asof_used = _fetch_last_prices(symbols)
 
-    raw_rows: List[dict] = []
+    raw_rows: list[dict] = []
     for sym, sym_txs in by_symbol.items():
         agg = _compute_position(sym_txs)
         asset = sym_txs[0].asset
@@ -324,7 +323,7 @@ def get_positions_view(portfolio_id: int, db: Session = Depends(get_db)):
     total_fees = sum(r["total_fees"] for r in raw_rows)
     total_ter = sum((r["estimated_ter_cost_annual"] or 0.0) for r in raw_rows)
 
-    rows: List[schema.PositionViewRow] = []
+    rows: list[schema.PositionViewRow] = []
     for r in raw_rows:
         weight = (
             (r["market_value"] / total_market_value)
