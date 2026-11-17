@@ -66,6 +66,8 @@ backend/
       schemas.py        Pydantic request / response models
     model.py          SQLAlchemy models (Portfolio, Assets, Positions, Transaction)
     schema.py         Pydantic request / response schemas
+    yahoo_client.py   thread-safe access to yfinance (its shared state is not safe under concurrent requests)
+    cache.py          thread-safe TTL cache
   migrations/         Alembic revisions (applied automatically when the API container starts)
   migrate.py          stamps pre-Alembic databases, then upgrades to head
   tests/              pytest suite (no network, no Postgres needed)
@@ -130,7 +132,8 @@ uv run --project backend pytest
 
 The test suite checks the quantitative core against closed-form results and simulated data
 (VaR/ES estimators, drawdowns, volatility scaling, mean-variance optimizers, WAC position accounting)
-and exercises the CRUD endpoints against an in-memory SQLite database. CI runs lint, tests, the
+and exercises the CRUD endpoints against an in-memory SQLite database. Concurrency tests reproduce
+yfinance's shared-state race with parallel requests and check that results never get mixed up. CI runs lint, tests, the
 frontend build, and replays the migrations on PostgreSQL (upgrade, `alembic check` for drift against
 the models, downgrade / upgrade round trip) on every push.
 

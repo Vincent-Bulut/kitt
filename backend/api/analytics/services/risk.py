@@ -4,7 +4,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from cachetools import TTLCache
 from scipy.stats import norm
 
 from backend.api import utils
@@ -13,12 +12,13 @@ from backend.api.analytics.quant.returns import nearest_prev_price
 from backend.api.analytics.quant.risk import as_return_series, es_summary, overlapping_horizon_returns, var_historical
 from backend.api.analytics.quant.simulation import business_dates_forward, simulate_gbm_paths
 from backend.api.analytics.schemas import ReturnMode
+from backend.api.cache import TTLStore
 
-RISK_CACHE = TTLCache(maxsize=2000, ttl=600)
+RISK_CACHE = TTLStore(maxsize=2000, ttl=600)
 
-MC_CACHE = TTLCache(maxsize=500, ttl=600)
+MC_CACHE = TTLStore(maxsize=500, ttl=600)
 
-PORTVAR_CACHE = TTLCache(maxsize=500, ttl=600)
+PORTVAR_CACHE = TTLStore(maxsize=500, ttl=600)
 
 
 def run_var_es(
@@ -44,8 +44,9 @@ def run_var_es(
         cls.append(float(a))
 
     cache_key = ("var_es", tuple(tickers), start_date, end_date, auto_adjust, return_mode, tuple(cls))
-    if cache_key in RISK_CACHE:
-        return RISK_CACHE[cache_key]
+    cached = RISK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -104,7 +105,7 @@ def run_var_es(
             errors[t] = str(e)
 
     out = {"data": data, "errors": errors}
-    RISK_CACHE[cache_key] = out
+    RISK_CACHE.set(cache_key, out)
     return out
 
 
@@ -147,8 +148,9 @@ def run_monte_carlo(
         round(float(initial_value), 6),
         end_ts.date().isoformat(),
     )
-    if cache_key in MC_CACHE:
-        return MC_CACHE[cache_key]
+    cached = MC_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -236,7 +238,7 @@ def run_monte_carlo(
         "weights": w_kept.tolist(),
         "errors": errors,
     }
-    MC_CACHE[cache_key] = out
+    MC_CACHE.set(cache_key, out)
     return out
 
 
@@ -291,8 +293,9 @@ def run_portfolio_var_es(
         None if portfolio_value is None else round(float(portfolio_value), 2),
         end_ts.date().isoformat(),
     )
-    if cache_key in PORTVAR_CACHE:
-        return PORTVAR_CACHE[cache_key]
+    cached = PORTVAR_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -476,5 +479,5 @@ def run_portfolio_var_es(
         "warnings": warnings,
         "errors": errors,
     }
-    PORTVAR_CACHE[cache_key] = out
+    PORTVAR_CACHE.set(cache_key, out)
     return out

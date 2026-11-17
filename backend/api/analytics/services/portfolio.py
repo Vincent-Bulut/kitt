@@ -4,21 +4,21 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from cachetools import TTLCache
 from scipy.stats import t as student_t
 
 from backend.api.analytics.market_data import PERIOD_DAYS, convert_close_to_base, download_close_daily_multi
 from backend.api.analytics.quant.pca import pc_interpretation, pc_sign_normalized
 from backend.api.analytics.quant.regression import REGRESSION_ANNUALIZATION, REGRESSION_ROLLING_WINDOW, ols_simple
 from backend.api.analytics.schemas import PCAMatrixType, ReturnMode
+from backend.api.cache import TTLStore
 
-CORR_CACHE = TTLCache(maxsize=500, ttl=600)
+CORR_CACHE = TTLStore(maxsize=500, ttl=600)
 
-HEALTH_CACHE = TTLCache(maxsize=500, ttl=600)
+HEALTH_CACHE = TTLStore(maxsize=500, ttl=600)
 
-PCA_CACHE = TTLCache(maxsize=200, ttl=600)
+PCA_CACHE = TTLStore(maxsize=200, ttl=600)
 
-REGRESSION_CACHE = TTLCache(maxsize=500, ttl=600)
+REGRESSION_CACHE = TTLStore(maxsize=500, ttl=600)
 
 
 def run_correlation(
@@ -55,8 +55,9 @@ def run_correlation(
         return_mode,
         end_ts.date().isoformat(),
     )
-    if cache_key in CORR_CACHE:
-        return CORR_CACHE[cache_key]
+    cached = CORR_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -145,7 +146,7 @@ def run_correlation(
         },
         "errors": errors,
     }
-    CORR_CACHE[cache_key] = out
+    CORR_CACHE.set(cache_key, out)
     return out
 
 
@@ -180,8 +181,9 @@ def run_portfolio_health(
         round(float(risk_free_rate), 6),
         end_ts.date().isoformat(),
     )
-    if cache_key in HEALTH_CACHE:
-        return HEALTH_CACHE[cache_key]
+    cached = HEALTH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -269,7 +271,7 @@ def run_portfolio_health(
         },
         "errors": errors,
     }
-    HEALTH_CACHE[cache_key] = out
+    HEALTH_CACHE.set(cache_key, out)
     return out
 
 
@@ -313,8 +315,9 @@ def run_pca_risk(
         int(top_loadings),
         end_ts.date().isoformat(),
     )
-    if cache_key in PCA_CACHE:
-        return PCA_CACHE[cache_key]
+    cached = PCA_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -515,7 +518,7 @@ def run_pca_risk(
         "warnings": warnings,
         "errors": errors,
     }
-    PCA_CACHE[cache_key] = out
+    PCA_CACHE.set(cache_key, out)
     return out
 
 
@@ -558,8 +561,9 @@ def run_portfolio_regression(
         base_currency,
         end_ts.date().isoformat(),
     )
-    if cache_key in REGRESSION_CACHE:
-        return REGRESSION_CACHE[cache_key]
+    cached = REGRESSION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     download = list(dict.fromkeys([*tickers, benchmark]))
     close = download_close_daily_multi(download, start_ts, end_ts, auto_adjust)
@@ -669,5 +673,5 @@ def run_portfolio_regression(
         "warnings": warnings,
         "errors": errors,
     }
-    REGRESSION_CACHE[cache_key] = out
+    REGRESSION_CACHE.set(cache_key, out)
     return out

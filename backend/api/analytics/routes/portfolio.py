@@ -94,8 +94,9 @@ def yahoo_black_litterman_post(req: BlackLittermanRequest):
         round(float(req.min_weight), 4),
         pd.Timestamp.now().normalize().date().isoformat(),
     )
-    if cache_key in BL_CACHE:
-        return BL_CACHE[cache_key]
+    cached = BL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     try:
         out = run_black_litterman(
             tickers=req.tickers,
@@ -111,7 +112,7 @@ def yahoo_black_litterman_post(req: BlackLittermanRequest):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    BL_CACHE[cache_key] = out
+    BL_CACHE.set(cache_key, out)
     return out
 
 

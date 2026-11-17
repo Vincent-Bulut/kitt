@@ -4,11 +4,9 @@ import io
 from typing import Any
 
 import pandas as pd
-import yfinance as yf
-from cachetools import TTLCache
 from fastapi.responses import StreamingResponse
 
-from backend.api import utils
+from backend.api import utils, yahoo_client
 from backend.api.analytics.market_data import download_close_multi, download_close_multi_interval, download_prices_close
 from backend.api.analytics.quant.drawdown import drawdown_metrics_and_episodes, drawdown_series, max_drawdown_path
 from backend.api.analytics.quant.returns import (
@@ -17,12 +15,13 @@ from backend.api.analytics.quant.returns import (
     nearest_prev_price,
 )
 from backend.api.analytics.schemas import PERIODS, ReturnMode, VolFrequency
+from backend.api.cache import TTLStore
 
 # 10-minute caches (key = tickers + dates + parameters)
-PERF_CACHE = TTLCache(maxsize=5000, ttl=600)
-DRAWDOWN_CACHE = TTLCache(maxsize=2000, ttl=600)
+PERF_CACHE = TTLStore(maxsize=5000, ttl=600)
+DRAWDOWN_CACHE = TTLStore(maxsize=2000, ttl=600)
 
-ANNVOL_CACHE = TTLCache(maxsize=2000, ttl=600)
+ANNVOL_CACHE = TTLStore(maxsize=2000, ttl=600)
 
 
 def yahoo_perf_asof(
@@ -35,11 +34,11 @@ def yahoo_perf_asof(
     """
 
     cache_key = (ticker, str(asof), auto_adjust)
-    if cache_key in PERF_CACHE:
-        return PERF_CACHE[cache_key]
+    cached = PERF_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    t = yf.Ticker(ticker)
-    hist = t.history(period="10y", interval="1d", auto_adjust=auto_adjust)
+    hist = yahoo_client.history(ticker, period="10y", interval="1d", auto_adjust=auto_adjust)
 
     if hist.empty:
         raise ValueError(f"No data for ticker '{ticker}'")
@@ -80,7 +79,7 @@ def yahoo_perf_asof(
         out[k] = None if past_price in (None, 0) else (last_price / past_price - 1) * 100
 
     df = pd.DataFrame([out])
-    PERF_CACHE[cache_key] = df
+    PERF_CACHE.set(cache_key, df)
     return df
 
 
@@ -149,8 +148,9 @@ def yahoo_arithmetic_return(
     Compute arithmetic return between start_date and end_date (inclusive logic by nearest previous close).
     """
     cache_key = ("arith_ret", ticker, start_date, end_date, auto_adjust)
-    if cache_key in PERF_CACHE:
-        return PERF_CACHE[cache_key]
+    cached = PERF_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     # Parse dates
     start_ts = utils.convert_to_timestamp(start_date)
@@ -160,13 +160,13 @@ def yahoo_arithmetic_return(
     if end_ts < start_ts:
         raise ValueError("end_date must be >= start_date")
 
-    t = yf.Ticker(ticker)
 
     # Fetch a bit wider window to be safe around non-trading days / holidays
     fetch_start = (start_ts - pd.Timedelta(days=10)).date().isoformat()
     fetch_end = (end_ts + pd.Timedelta(days=3)).date().isoformat()
 
-    hist = t.history(
+    hist = yahoo_client.history(
+        ticker,
         start=fetch_start,
         end=fetch_end,
         interval="1d",
@@ -204,7 +204,7 @@ def yahoo_arithmetic_return(
     }
 
     df = pd.DataFrame([out])
-    PERF_CACHE[cache_key] = df
+    PERF_CACHE.set(cache_key, df)
     return df
 
 
@@ -355,8 +355,9 @@ def run_drawdown(
         raise ValueError("end_date must be >= start_date")
 
     cache_key = ("dd_multi", tuple(tickers), start_date, end_date, auto_adjust, include_series)
-    if cache_key in DRAWDOWN_CACHE:
-        return DRAWDOWN_CACHE[cache_key]
+    cached = DRAWDOWN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -396,7 +397,7 @@ def run_drawdown(
             errors[t] = str(e)
 
     out = {"data": data, "errors": errors}
-    DRAWDOWN_CACHE[cache_key] = out
+    DRAWDOWN_CACHE.set(cache_key, out)
     return out
 
 
@@ -417,8 +418,9 @@ def run_annualized_volatility(
         raise ValueError("end_date must be >= start_date")
 
     cache_key = ("ann_vol", tuple(tickers), start_date, end_date, auto_adjust, frequency, return_mode)
-    if cache_key in ANNVOL_CACHE:
-        return ANNVOL_CACHE[cache_key]
+    cached = ANNVOL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_multi_interval(tickers, start_ts, end_ts, auto_adjust, frequency)
     if close.empty:
@@ -460,5 +462,5 @@ def run_annualized_volatility(
             errors[t] = str(e)
 
     out = {"data": data, "errors": errors}
-    ANNVOL_CACHE[cache_key] = out
+    ANNVOL_CACHE.set(cache_key, out)
     return out
