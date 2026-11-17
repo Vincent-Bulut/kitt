@@ -4,12 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backend.api.analytics import (
-    _compute_vols,
-    _drawdown_metrics_and_episodes,
-    _max_drawdown_path,
-    _nearest_prev_price,
+from backend.api.analytics.quant.drawdown import drawdown_metrics_and_episodes, max_drawdown_path
+from backend.api.analytics.quant.returns import (
+    compute_vols,
     cumulative_returns_series_from_prices,
+    nearest_prev_price,
 )
 
 
@@ -21,21 +20,21 @@ def prices(values, start="2024-01-01") -> pd.Series:
 
 def test_nearest_prev_price_falls_back_to_last_available_date():
     s = prices([100, 101, 102])  # Mon 1, Tue 2, Wed 3 January 2024
-    price, used = _nearest_prev_price(s, pd.Timestamp("2024-01-10"))
+    price, used = nearest_prev_price(s, pd.Timestamp("2024-01-10"))
     assert price == 102
     assert used == pd.Timestamp("2024-01-03")
 
 
 def test_nearest_prev_price_before_first_date_returns_none():
     s = prices([100, 101])
-    assert _nearest_prev_price(s, pd.Timestamp("2023-12-31")) == (None, None)
+    assert nearest_prev_price(s, pd.Timestamp("2023-12-31")) == (None, None)
 
 
 # --- drawdowns ----------------------------------------------------------------
 
 def test_max_drawdown_path_finds_peak_trough_and_recovery():
     s = prices([100, 120, 90, 60, 100, 130, 125])
-    path = _max_drawdown_path(s)
+    path = max_drawdown_path(s)
     assert path["max_drawdown"] == pytest.approx(-0.5)
     assert path["peak_date"] == s.index[1].date().isoformat()
     assert path["trough_date"] == s.index[3].date().isoformat()
@@ -43,7 +42,7 @@ def test_max_drawdown_path_finds_peak_trough_and_recovery():
 
 
 def test_max_drawdown_path_without_recovery():
-    path = _max_drawdown_path(prices([100, 80, 90]))
+    path = max_drawdown_path(prices([100, 80, 90]))
     assert path["recovery_date"] is None
     assert path["max_drawdown"] == pytest.approx(-0.2)
 
@@ -51,7 +50,7 @@ def test_max_drawdown_path_without_recovery():
 def test_drawdown_episodes_and_metrics():
     # Two episodes: 100 -> 90 (recovered at 110), then 110 -> 99 (still open)
     s = prices([100, 90, 95, 110, 99])
-    metrics, episodes = _drawdown_metrics_and_episodes(s)
+    metrics, episodes = drawdown_metrics_and_episodes(s)
 
     assert metrics["num_drawdown_episodes"] == 2
     assert metrics["max_drawdown"] == pytest.approx(-0.10)
@@ -65,7 +64,7 @@ def test_drawdown_episodes_and_metrics():
 
 
 def test_monotonic_prices_have_no_drawdown():
-    metrics, episodes = _drawdown_metrics_and_episodes(prices([1, 2, 3, 4]))
+    metrics, episodes = drawdown_metrics_and_episodes(prices([1, 2, 3, 4]))
     assert episodes == []
     assert metrics["max_drawdown"] == 0.0
     assert metrics["num_drawdown_episodes"] == 0
@@ -100,7 +99,7 @@ def test_annualized_volatility_uses_sqrt_of_time():
     daily = rng.normal(0, 0.01, size=1_000)
     s = prices(100 * np.exp(np.cumsum(daily)))
 
-    out = _compute_vols(s, s.index[0], s.index[-1], "daily", "log")
+    out = compute_vols(s, s.index[0], s.index[-1], "daily", "log")
 
     assert out["observations"] == len(s) - 1
     assert out["annualized_volatility"] == pytest.approx(out["volatility_period"] * np.sqrt(252))
@@ -110,4 +109,4 @@ def test_annualized_volatility_uses_sqrt_of_time():
 def test_volatility_requires_enough_points():
     s = prices([100, 101])
     with pytest.raises(ValueError):
-        _compute_vols(s, s.index[0], s.index[-1], "daily", "arith")
+        compute_vols(s, s.index[0], s.index[-1], "daily", "arith")

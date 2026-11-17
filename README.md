@@ -58,7 +58,12 @@ backend/
     admin.py          portfolio CRUD
     transactions.py   transactions + positions view (WAC accounting)
     referential.py    asset universe, Excel upload, PEA referential
-    analytics.py      performance, risk and optimization endpoints
+    analytics/        quantitative analytics, layered:
+      routes/           thin FastAPI routers (performance, risk, portfolio)
+      services/         orchestration: market data + computation + caching
+      quant/            pure functions: returns, drawdown, risk, optimization, PCA, regression, simulation
+      market_data.py    Yahoo Finance prices and FX (the only network I/O)
+      schemas.py        Pydantic request / response models
     model.py          SQLAlchemy models (Portfolio, Assets, Positions, Transaction)
     schema.py         Pydantic request / response schemas
   tests/              pytest suite (no network, no Postgres needed)
@@ -120,7 +125,7 @@ frontend build on every push.
 
 This is a personal project used as a sandbox for portfolio analytics. Next steps:
 
-- [ ] Split `analytics.py` into `market_data` / `risk` / `performance` / `optimization` modules behind a service layer
+- [ ] Merge the remaining Yahoo download helpers into a single market-data client
 - [ ] Alembic migrations (tables are currently created at startup)
 - [ ] `Numeric` instead of `Float` for prices and amounts
 - [ ] Persist daily prices in PostgreSQL through a scheduled, incremental ingestion job instead of fetching on demand

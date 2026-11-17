@@ -62,7 +62,11 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 - **Routers** (each in its own file under `backend/api/`):
   - `admin.py` — Portfolio CRUD (`/admin/portfolio`, `/admin/portfolios`)
   - `referential.py` — Asset listing, ETFBook static-data proxy, Excel upload/upsert into `assets` table (`/referential/`)
-  - `analytics.py` — Yahoo Finance analytics: performance table, arithmetic return, cumulative returns series, drawdown analysis, annualized volatility, VaR/ES (`/analytics/yahoo/…`). All computation results are cached with `cachetools.TTLCache` (10 min).
+  - `analytics/` — Yahoo Finance analytics package (`/analytics/yahoo/…`), layered so that dependencies only point downwards:
+    - `routes/{performance,risk,portfolio}.py` — thin routers, aggregated in `analytics/__init__.py` under the `/analytics` prefix
+    - `services/{performance,risk,portfolio,optimization}.py` — `run_*` use cases: download data, call `quant`, cache results in `cachetools.TTLCache` (10 min)
+    - `quant/` — pure functions (returns, drawdown, VaR/ES, optimization, PCA, regression, simulation): no FastAPI, no network, no cache; this is what the unit tests target
+    - `market_data.py` — all Yahoo Finance / FX downloads; `schemas.py` — Pydantic models
   - `transactions.py` — Transaction CRUD and the computed positions view (weighted-average cost, P&L) (`/portfolios/{id}/…`, `/transactions/…`)
   - `etfbook_primary.py` — Async proxy to ETFBook dynamic data API (NAV/AUM time series), chunked by 50 ISINs. Not mounted in `main.py`.
 - **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.

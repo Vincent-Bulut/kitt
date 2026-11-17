@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from scipy.stats import norm
 
-from backend.api.analytics import (
+from backend.api.analytics.quant.risk import (
     es_cf_empirical_tail,
     es_gaussian,
     es_historical,
