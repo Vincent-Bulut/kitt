@@ -23,7 +23,7 @@ Period = Literal["1D", "1W", "1M", "YTD", "1Y", "3Y", "5Y"]
 PERIODS_RET = ["ARITH"]
 ReturnType = Literal["ARITH"]
 
-# Cache 10 minutes (clé = ticker + asof + auto_adjust)
+# 10-minute caches (key = tickers + dates + parameters)
 CACHE = TTLCache(maxsize=5000, ttl=600)
 DRAWDOWN_CACHE = TTLCache(maxsize=2000, ttl=600)
 
@@ -135,7 +135,7 @@ class YahooCumReturnsResponse(BaseModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
 class YahooCumReturnsRequest(BaseModel):
-    tickers: list[str] = Field(min_length=1, max_length=200)  # séries => limite plus basse
+    tickers: list[str] = Field(min_length=1, max_length=200)  # full series returned => lower limit
     start_date: str
     end_date: str
     auto_adjust: bool = True
@@ -1095,7 +1095,7 @@ def _download_prices_close(
     auto_adjust: bool,
 ) -> pd.DataFrame:
     """
-    Télécharge les prix Close (auto_adjust => adj close économique) pour plusieurs tickers.
+    Download Close prices (auto_adjust => economically adjusted close) for several tickers.
     Retourne DataFrame index date, colonnes tickers.
     """
     fetch_start = (start_ts - pd.Timedelta(days=10)).date().isoformat()
@@ -1116,9 +1116,9 @@ def _download_prices_close(
         return pd.DataFrame()
 
     # yfinance multi-tickers: colonnes MultiIndex (Field, Ticker) ou (Ticker, Field) selon versions
-    # On essaie d'extraire "Close" de manière robuste.
+    # Extract "Close" robustly whatever the column layout.
     if isinstance(df.columns, pd.MultiIndex):
-        # Cas le plus fréquent: niveau 0 = price field ("Close", "Open"...), niveau 1 = ticker
+        # Most common case: level 0 = price field ("Close", "Open"...), level 1 = ticker
         if "Close" in df.columns.get_level_values(0):
             close = df["Close"]
         # Autre cas: niveau 1 = field
@@ -1136,7 +1136,7 @@ def _download_prices_close(
     close = close.dropna(how="all").copy()
     close.index = pd.to_datetime(close.index).tz_localize(None)
 
-    # Tronque proprement la fenêtre demandée (on garde les dates <= end_ts)
+    # Trim to the requested window (keep dates <= end_ts)
     close = close.loc[:end_ts]
     return close
 
@@ -1160,7 +1160,7 @@ def cumulative_returns_series_from_prices(
 ) -> tuple[pd.Timestamp, float, pd.Series]:
     """
     Renvoie (start_used_date, base_price, cum_return_series_decimal)
-    cum_return_series est indexé par date, valeurs en décimal (0.10 = +10%).
+    cum_return_series is indexed by date, values in decimal (0.10 = +10%).
     """
     s = prices.dropna().copy()
     s.index = pd.to_datetime(s.index).tz_localize(None)
@@ -1170,7 +1170,7 @@ def cumulative_returns_series_from_prices(
     if base_price is None:
         raise ValueError(f"No price data on or before {start_ts.date()}")
 
-    # Garder à partir du start_used (cohérence)
+    # Keep data from start_used onwards
     s2 = s.loc[start_used:]
     if s2.empty:
         raise ValueError("No prices after start_date_used")

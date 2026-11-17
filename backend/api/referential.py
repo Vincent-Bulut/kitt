@@ -81,7 +81,7 @@ def list_assets(db: Session = Depends(get_db)):
         assets = db.query(model.Assets).all()
         return assets
     except SQLAlchemyError as e:
-        raise HTTPException(status_code=500, detail=f"Erreur de base de données : {e!s}") from e
+        raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e
 
 @router.post("/upload-excel")
 def upload_referential_excel(
@@ -124,11 +124,11 @@ def upload_referential_excel(
     if "symbol" not in present_cols:
         present_cols = ["symbol", *present_cols]
 
-    # ✅ fees: cast en float
+    # fees: cast to float
     if "fees" in df.columns:
         df["fees"] = pd.to_numeric(df["fees"], errors="coerce")
 
-    # ✅ NaN/Inf -> None (sinon NaN part en DB et casse le JSON)
+    # NaN/Inf -> None (otherwise NaN reaches the DB and breaks JSON)
     df = df.replace([np.nan, np.inf, -np.inf], None)
 
     payload = df[present_cols].to_dict(orient="records")
@@ -136,7 +136,7 @@ def upload_referential_excel(
     try:
         stmt = insert(model.Assets).values(payload)
 
-        # ✅ ne pas écraser avec NULL quand Excel est vide
+        # Do not overwrite existing values with NULL when the Excel cell is empty
         update_cols = {
             c: func.coalesce(getattr(stmt.excluded, c), getattr(model.Assets, c))
             for c in present_cols

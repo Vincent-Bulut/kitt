@@ -43,7 +43,7 @@ class DynamicDataService:
                     )
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as e:
-                    # On remonte l'erreur upstream avec un message clair
+                    # Surface the upstream error with a clear message
                     raise HTTPException(
                         status_code=502,
                         detail=f"Upstream error ({e.response.status_code}) on dynamic-data call",
@@ -84,7 +84,7 @@ class DynamicDataService:
                 .dt.strftime("%Y-%m-%d")
             )
 
-        # 4) drop cols si présentes
+        # 4) drop columns if present
         drop_cols = ["createdAt", "modifiedAt", "modifiedBy", "createdBy"]
         final_df.drop(columns=[c for c in drop_cols if c in final_df.columns], inplace=True)
 

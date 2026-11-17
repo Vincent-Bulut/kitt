@@ -28,11 +28,11 @@ def create_transaction(
 ):
     portfolio = db.get(model.Portfolio, portfolio_id)
     if portfolio is None:
-        raise HTTPException(status_code=404, detail="Portfolio introuvable.")
+        raise HTTPException(status_code=404, detail="Portfolio not found.")
 
     asset = db.get(model.Assets, payload.symbol)
     if asset is None:
-        raise HTTPException(status_code=404, detail=f"Asset '{payload.symbol}' introuvable.")
+        raise HTTPException(status_code=404, detail=f"Asset '{payload.symbol}' not found.")
 
     amount = payload.amount if payload.amount is not None else payload.quantity * payload.price
     currency = payload.currency or asset.currency
@@ -65,7 +65,7 @@ def create_transaction(
 def list_transactions(portfolio_id: int, db: Session = Depends(get_db)):
     portfolio = db.get(model.Portfolio, portfolio_id)
     if portfolio is None:
-        raise HTTPException(status_code=404, detail="Portfolio introuvable.")
+        raise HTTPException(status_code=404, detail="Portfolio not found.")
     return (
         db.query(model.Transaction)
         .filter(model.Transaction.portfolio_id == portfolio_id)
@@ -78,7 +78,7 @@ def list_transactions(portfolio_id: int, db: Session = Depends(get_db)):
 def get_transaction(transaction_id: int, db: Session = Depends(get_db)):
     tx = db.get(model.Transaction, transaction_id)
     if tx is None:
-        raise HTTPException(status_code=404, detail="Transaction introuvable.")
+        raise HTTPException(status_code=404, detail="Transaction not found.")
     return tx
 
 
@@ -86,10 +86,10 @@ def get_transaction(transaction_id: int, db: Session = Depends(get_db)):
 def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
     tx = db.get(model.Transaction, transaction_id)
     if tx is None:
-        raise HTTPException(status_code=404, detail="Transaction introuvable.")
+        raise HTTPException(status_code=404, detail="Transaction not found.")
     db.delete(tx)
     db.commit()
-    return {"message": "Transaction supprimée avec succès"}
+    return {"message": "Transaction deleted"}
 
 
 # =============================================================
@@ -244,7 +244,7 @@ def _compute_position(transactions: list[model.Transaction]) -> dict:
 def get_positions_view(portfolio_id: int, db: Session = Depends(get_db)):
     portfolio = db.get(model.Portfolio, portfolio_id)
     if portfolio is None:
-        raise HTTPException(status_code=404, detail="Portfolio introuvable.")
+        raise HTTPException(status_code=404, detail="Portfolio not found.")
 
     txs = (
         db.query(model.Transaction)
