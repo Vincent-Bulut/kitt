@@ -68,7 +68,7 @@ jobs:
       run:
         working-directory: frontend
     env:
-      PUBLIC_APP_API_URL: http://localhost:8000/
+      PUBLIC_APP_API_URL: /api/
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -1,10 +1,14 @@
 """Performance endpoints."""
 
+from typing import Annotated
+
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from backend.api import utils
+from backend.api.analytics.routes.params import check_date_range, parse_confidence_levels, parse_tickers
 from backend.api.analytics.schemas import (
+    IsoDate,
     ReturnMode,
     VolFrequency,
     YahooAllMetricsRequest,
@@ -35,14 +39,12 @@ router = APIRouter()
 
 @router.get("/yahoo/perf", response_model=YahooPerfResponse)
 def yahoo_perf_get(
-    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    asof: str | None = Query(None, description="YYYY-MM-DD"),
+    tickers: Annotated[str, Query(description="Comma-separated: AAPL,SPY,AIR.PA")],
+    asof: Annotated[IsoDate | None, Query(description="YYYY-MM-DD")] = None,
     auto_adjust: bool = True,
     format: str = Query("json", pattern="^(json|csv)$"),
 ):
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers is required")
+    ticker_list = parse_tickers(tickers, max_tickers=500)
 
     return run_perf(ticker_list, asof, auto_adjust, format)
 
@@ -57,15 +59,14 @@ def yahoo_perf_post(
 
 @router.get("/yahoo/arithmetic-return", response_model=YahooReturnResponse)
 def yahoo_arithmetic_return_get(
-    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    start_date: str = Query(..., description="YYYY-MM-DD"),
-    end_date: str = Query(..., description="YYYY-MM-DD"),
+    tickers: Annotated[str, Query(description="Comma-separated: AAPL,SPY,AIR.PA")],
+    start_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
+    end_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
     auto_adjust: bool = True,
     format: str = Query("json", pattern="^(json|csv)$"),
 ):
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers is required")
+    ticker_list = parse_tickers(tickers, max_tickers=500)
+    check_date_range(start_date, end_date)
 
     return run_arithmetic_return(ticker_list, start_date, end_date, auto_adjust, format)
 
@@ -80,15 +81,14 @@ def yahoo_arithmetic_return_post(
 
 @router.get("/yahoo/cumulative-returns", response_model=YahooCumReturnsResponse)
 def yahoo_cumulative_returns_get(
-    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    start_date: str = Query(..., description="YYYY-MM-DD"),
-    end_date: str = Query(..., description="YYYY-MM-DD"),
+    tickers: Annotated[str, Query(description="Comma-separated: AAPL,SPY,AIR.PA")],
+    start_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
+    end_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
     auto_adjust: bool = True,
     format: str = Query("json", pattern="^(json|csv)$"),
 ):
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers is required")
+    ticker_list = parse_tickers(tickers, max_tickers=200)
+    check_date_range(start_date, end_date)
 
     return run_cum_returns(ticker_list, start_date, end_date, auto_adjust, format)
 
@@ -103,15 +103,14 @@ def yahoo_cumulative_returns_post(
 
 @router.get("/yahoo/drawdowns", response_model=YahooDrawdownResponse)
 def yahoo_drawdowns_get(
-    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    start_date: str = Query(..., description="YYYY-MM-DD"),
-    end_date: str = Query(..., description="YYYY-MM-DD"),
+    tickers: Annotated[str, Query(description="Comma-separated: AAPL,SPY,AIR.PA")],
+    start_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
+    end_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
     auto_adjust: bool = True,
     include_series: bool = False,
 ):
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers is required")
+    ticker_list = parse_tickers(tickers, max_tickers=200)
+    check_date_range(start_date, end_date)
 
     return run_drawdown(ticker_list, start_date, end_date, auto_adjust, include_series)
 
@@ -123,16 +122,15 @@ def yahoo_drawdowns_post(req: YahooDrawdownRequest):
 
 @router.get("/yahoo/annualized-volatility", response_model=YahooAnnVolResponse)
 def yahoo_annualized_volatility_get(
-    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    start_date: str = Query(..., description="YYYY-MM-DD"),
-    end_date: str = Query(..., description="YYYY-MM-DD"),
+    tickers: Annotated[str, Query(description="Comma-separated: AAPL,SPY,AIR.PA")],
+    start_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
+    end_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
     auto_adjust: bool = True,
     frequency: VolFrequency = Query("daily", description="daily|weekly|monthly"),
     return_mode: ReturnMode = Query("log", description="log|arith"),
 ):
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers is required")
+    ticker_list = parse_tickers(tickers, max_tickers=200)
+    check_date_range(start_date, end_date)
 
     return run_annualized_volatility(
         tickers=ticker_list,
@@ -208,7 +206,7 @@ def yahoo_all_metrics_post(req: YahooAllMetricsRequest):
     )
 
     # 4. Risk (VaR/ES)
-    cl_list = [float(x.strip()) for x in req.confidence_levels.split(",") if x.strip()]
+    cl_list = parse_confidence_levels(req.confidence_levels)
     risk_data = run_var_es(
         tickers=req.tickers,
         start_date=start_date_str,

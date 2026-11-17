@@ -2,11 +2,10 @@ from datetime import date as date_type
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.api import model, schema, yahoo_client
-from backend.api.database import get_db
+from backend.api.database import commit_or_conflict, get_db
 
 router = APIRouter(tags=["TRANSACTIONS"])
 
@@ -36,25 +35,21 @@ def create_transaction(
     amount = payload.amount if payload.amount is not None else payload.quantity * payload.price
     currency = payload.currency or asset.currency
 
-    try:
-        tx = model.Transaction(
-            portfolio_id=portfolio_id,
-            symbol=payload.symbol,
-            date=payload.date,
-            side=model.TransactionSide(payload.side.value),
-            quantity=payload.quantity,
-            price=payload.price,
-            transaction_fee=payload.transaction_fee or 0.0,
-            amount=amount,
-            currency=currency,
-        )
-        db.add(tx)
-        db.commit()
-        db.refresh(tx)
-        return tx
-    except SQLAlchemyError as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    tx = model.Transaction(
+        portfolio_id=portfolio_id,
+        symbol=payload.symbol,
+        date=payload.date,
+        side=model.TransactionSide(payload.side.value),
+        quantity=payload.quantity,
+        price=payload.price,
+        transaction_fee=payload.transaction_fee or 0.0,
+        amount=amount,
+        currency=currency,
+    )
+    db.add(tx)
+    commit_or_conflict(db)
+    db.refresh(tx)
+    return tx
 
 
 @router.get(

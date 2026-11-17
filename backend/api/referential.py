@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 
 import numpy as np
@@ -15,6 +16,10 @@ from backend.api.database import get_db
 from backend.api.pea import find_new_isins, scrape_pea_etfs, to_csv
 
 router = APIRouter(prefix='/referential', tags=['REFERENTIAL'])
+
+log = logging.getLogger(__name__)
+
+MAX_UPLOAD_BYTES = 10_000_000
 
 
 @router.get("/")
@@ -49,14 +54,7 @@ def check_new_pea_isins(db: Session = Depends(get_db)):
     except (requests.RequestException, RuntimeError, ValueError) as e:
         raise HTTPException(status_code=502, detail=f"Euronext scraping failed: {e}") from e
 
-    try:
-        known_isins = {
-            isin.strip().upper()
-            for (isin,) in db.query(model.Assets.isin).all()
-            if isin
-        }
-    except SQLAlchemyError as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e
+    known_isins = {isin.strip().upper() for (isin,) in db.query(model.Assets.isin).all() if isin}
 
     new_etfs = find_new_isins(etfs, known_isins)
 
@@ -73,11 +71,7 @@ def list_assets(db: Session = Depends(get_db)):
     """
     Retrieves the list of all assets from the database.
     """
-    try:
-        assets = db.query(model.Assets).all()
-        return assets
-    except SQLAlchemyError as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e
+    return db.query(model.Assets).all()
 
 @router.post("/upload-excel")
 def upload_referential_excel(
@@ -88,17 +82,18 @@ def upload_referential_excel(
     if not (filename.endswith(".xlsx") or filename.endswith(".xls")):
         raise HTTPException(status_code=400, detail="Please upload an Excel file (.xlsx/.xls).")
 
-    try:
-        content = file.file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Empty file.")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read uploaded file: {e}") from e
+    # Read at most one byte more than the limit, so oversized uploads are rejected without loading them
+    content = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (max {MAX_UPLOAD_BYTES // 1_000_000} MB).")
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file.")
 
     try:
         df = pd.read_excel(BytesIO(content))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid Excel file: {e}") from e
+    except Exception as e:  # openpyxl raises many different exception types on malformed files
+        log.warning("invalid Excel upload %r: %s", file.filename, e)
+        raise HTTPException(status_code=400, detail="Invalid or unreadable Excel file.") from e
 
     df.columns = [c.strip().lower() for c in df.columns]
 
@@ -149,6 +144,6 @@ def upload_referential_excel(
 
         return {"inserted_or_updated": int(result.rowcount or len(payload)), "rows_in_file": len(payload)}
 
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e
+        raise

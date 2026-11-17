@@ -40,13 +40,11 @@ services:
       context: ./
       dockerfile: backend/Dockerfile
     container_name: kitt_api_container
-    ports:
-      # Publié car le frontend appelle directement http://localhost:8000/ (PUBLIC_APP_API_URL)
-      - "8000:8000"
+    # Pas de port publié : l'API n'est joignable que via nginx (http://localhost/api/)
     depends_on:
       postgres:
         condition: service_healthy
-    environment: # prioritaire sur env_file
+    environment:
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432
       DATABASE_NAME: ${POSTGRES_DB}

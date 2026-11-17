@@ -55,7 +55,7 @@ docker compose up --build  # rebuild images
 
 Requires a root `.env` (copy `.env.example`) for Postgres/pgAdmin credentials.
 
-In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/api/` → FastAPI on port 8000, and `/` → the static frontend served by nginx on port 80. Host-published ports: 80 (nginx), 8000 (API — the frontend calls `http://localhost:8000/` directly), and 127.0.0.1-only 5432 (Postgres) and 8080 (pgAdmin). The frontend container publishes no port.
+In prod Docker, nginx listens on port 80 (maps to internal port 5700), routes `/api/` → FastAPI on port 8000 (prefix stripped; uvicorn runs with `--root-path /api` so `/api/docs` works), and `/` → the static frontend. Host-published ports: 80 (nginx) and 127.0.0.1-only 5432 (Postgres) and 8080 (pgAdmin). The API and frontend containers publish no port: the browser only talks to nginx (same origin). In dev, `frontend/vite.config.ts` proxies `/api` to `localhost:8000` the same way. nginx caps request bodies at 12 MB and forwards `X-Request-ID`.
 
 Images: the API image (`backend/Dockerfile`) is built from the project root with `uv sync --locked --no-dev` and runs as a non-root user; `.env` files are excluded from build contexts (`.dockerignore`). The frontend image is a two-stage build (`npm ci` + `vite build`, then nginx); `frontend/.env` is kept in its build context because `PUBLIC_*` variables are inlined at build time.
 
@@ -63,7 +63,9 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 
 ### Backend (`backend/`)
 
-- **Entry point**: `backend/api/main.py` — creates the FastAPI `api` instance, registers CORS middleware (origins from `CORS_ORIGINS`), mounts all routers and exposes `/health`.
+- **Entry point**: `backend/api/main.py` — creates the FastAPI `api` instance, registers CORS middleware (origins from `CORS_ORIGINS`; only needed when the frontend is not served from the same origin), installs `observability` (logfmt request logs with `X-Request-ID`, generic 500 handler), mounts all routers and exposes `/health`.
+- **Errors**: never put exception text in `HTTPException.detail` (it reaches the client). Business `ValueError`s raised on purpose by analytics services are the exception. Commit with `database.commit_or_conflict()` (constraint violation → 409); let other errors propagate to the generic handler.
+- **Input validation**: analytics dates use `schemas.IsoDate`; in GET routes declare them as `Annotated[IsoDate, Query(...)]` (with `= Query(...)` FastAPI skips the validator). Parse comma-separated query lists with `routes/params.py`.
 - **Routers** (each in its own file under `backend/api/`):
   - `admin.py` — Portfolio CRUD (`/admin/portfolio`, `/admin/portfolios`)
   - `referential.py` — Asset listing, Excel upload/upsert into `assets` table, Euronext PEA scraping (`/referential/`)
@@ -104,7 +106,7 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 **Frontend** (`frontend/.env`):
 | Variable | Purpose |
 |---|---|
-| `PUBLIC_APP_API_URL` | Backend API base URL (e.g. `http://localhost:8000/`) |
+| `PUBLIC_APP_API_URL` | `/api/` (relative: nginx in prod, Vite proxy in dev) |
 
 ### Data Model
 

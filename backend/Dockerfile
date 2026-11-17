@@ -39,4 +39,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)" || exit 1
 
 # Apply database migrations, then start the API
-CMD ["sh", "-c", "python -m backend.migrate && exec uvicorn backend.api.main:api --host 0.0.0.0 --port 8000 --proxy-headers"]
+CMD ["sh", "-c", "python -m backend.migrate && exec uvicorn backend.api.main:api --host 0.0.0.0 --port 8000 --proxy-headers --no-access-log --root-path /api"]

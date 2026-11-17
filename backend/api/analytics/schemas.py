@@ -1,8 +1,31 @@
 """Request / response schemas of the analytics API."""
 
-from typing import Literal
+from datetime import date
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, model_validator
+
+
+def _iso_date(value: str) -> str:
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise ValueError("must be a valid date in YYYY-MM-DD format") from None
+
+
+# Date received as a string, validated and normalised to YYYY-MM-DD (invalid dates -> 422, not 500)
+IsoDate = Annotated[str, AfterValidator(_iso_date)]
+
+
+class DateRangeRequest(BaseModel):
+    """Base for requests with a start_date / end_date window."""
+
+    @model_validator(mode="after")
+    def _check_range(self):
+        start, end = getattr(self, "start_date", None), getattr(self, "end_date", None)
+        if start and end and start > end:  # ISO strings compare chronologically
+            raise ValueError("start_date must be on or before end_date")
+        return self
 
 PERIODS = ["1D", "1W", "1M", "YTD", "1Y", "3Y", "5Y"]
 Period = Literal["1D", "1W", "1M", "YTD", "1Y", "3Y", "5Y"]
@@ -26,7 +49,7 @@ class YahooPerfResponse(BaseModel):
 
 class YahooPerfRequest(BaseModel):
     tickers: list[str] = Field(min_length=1, max_length=500)
-    asof: str | None = None
+    asof: IsoDate | None = None
     auto_adjust: bool = True
 
 class YahooReturnRow(BaseModel):
@@ -45,10 +68,10 @@ class YahooReturnResponse(BaseModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
 
-class YahooReturnRequest(BaseModel):
+class YahooReturnRequest(DateRangeRequest):
     tickers: list[str] = Field(min_length=1, max_length=500)
-    start_date: str  # YYYY-MM-DD
-    end_date: str    # YYYY-MM-DD
+    start_date: IsoDate  # YYYY-MM-DD
+    end_date: IsoDate    # YYYY-MM-DD
     auto_adjust: bool = True
 
 class CumReturnPoint(BaseModel):
@@ -67,10 +90,10 @@ class YahooCumReturnsResponse(BaseModel):
     data: list[YahooCumReturnsSeries]
     errors: dict[str, str] = Field(default_factory=dict)
 
-class YahooCumReturnsRequest(BaseModel):
+class YahooCumReturnsRequest(DateRangeRequest):
     tickers: list[str] = Field(min_length=1, max_length=200)  # full series returned => lower limit
-    start_date: str
-    end_date: str
+    start_date: IsoDate
+    end_date: IsoDate
     auto_adjust: bool = True
 
 class DrawdownEpisode(BaseModel):
@@ -114,10 +137,10 @@ class YahooDrawdownResponse(BaseModel):
     data: list[YahooDrawdownRow]
     errors: dict[str, str] = Field(default_factory=dict)
 
-class YahooDrawdownRequest(BaseModel):
+class YahooDrawdownRequest(DateRangeRequest):
     tickers: list[str] = Field(min_length=1, max_length=200)
-    start_date: str
-    end_date: str
+    start_date: IsoDate
+    end_date: IsoDate
     auto_adjust: bool = True
     include_series: bool = False
 
@@ -142,10 +165,10 @@ class YahooAnnVolResponse(BaseModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
 
-class YahooAnnVolRequest(BaseModel):
+class YahooAnnVolRequest(DateRangeRequest):
     tickers: list[str] = Field(min_length=1, max_length=200)
-    start_date: str
-    end_date: str
+    start_date: IsoDate
+    end_date: IsoDate
     auto_adjust: bool = True
     frequency: VolFrequency = "daily"
     return_mode: ReturnMode = "log"
@@ -178,13 +201,13 @@ class YahooVaREsResponse(BaseModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
 
-class YahooVaREsRequest(BaseModel):
+class YahooVaREsRequest(DateRangeRequest):
     tickers: list[str] = Field(min_length=1, max_length=200)
-    start_date: str
-    end_date: str
+    start_date: IsoDate
+    end_date: IsoDate
     auto_adjust: bool = True
     return_mode: ReturnMode = "arith"
-    confidence_levels: list[float] = Field(default_factory=lambda: [0.95, 0.99])
+    confidence_levels: list[float] = Field(default_factory=lambda: [0.95, 0.99], min_length=1, max_length=10)
 
 
 class YahooAllMetricsResponse(BaseModel):
@@ -384,7 +407,7 @@ class PortfolioSamplerRequest(BaseModel):
 
 class EfficientFrontierRequest(BaseModel):
     tickers: list[str] = Field(min_length=2, max_length=50)
-    weights: list[float] | None = None
+    weights: list[float] | None = Field(default=None, max_length=100)
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     risk_free_rate: float = Field(default=0.02, ge=0.0, le=0.5)
@@ -436,7 +459,7 @@ class BlackLittermanResponse(BaseModel):
 
 class BlackLittermanRequest(BaseModel):
     tickers: list[str] = Field(min_length=2, max_length=50)
-    prior_weights: list[float] | None = None             # market / equilibrium weights; default equal
+    prior_weights: list[float] | None = Field(default=None, max_length=100)             # market / equilibrium weights; default equal
     views: list[BLView] = Field(default_factory=list)
     lookback_period: str = "3Y"
     auto_adjust: bool = True
@@ -516,7 +539,7 @@ class PCARiskResponse(BaseModel):
 
 class PCARiskRequest(BaseModel):
     tickers: list[str] = Field(min_length=2, max_length=100)
-    weights: list[float] | None = None           # portfolio weights; default equal
+    weights: list[float] | None = Field(default=None, max_length=100)           # portfolio weights; default equal
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     return_mode: ReturnMode = "log"
@@ -602,10 +625,10 @@ class PortfolioVaREsResponse(BaseModel):
 
 class PortfolioVaREsRequest(BaseModel):
     tickers: list[str] = Field(min_length=1, max_length=100)
-    weights: list[float] | None = None           # portfolio weights; default equal
+    weights: list[float] | None = Field(default=None, max_length=100)           # portfolio weights; default equal
     lookback_period: str = "3Y"
     auto_adjust: bool = True
-    confidence_levels: list[float] = Field(default_factory=lambda: [0.95, 0.99])
+    confidence_levels: list[float] = Field(default_factory=lambda: [0.95, 0.99], min_length=1, max_length=10)
     horizon_days: int = Field(default=1, ge=1, le=60)
     portfolio_value: float | None = Field(default=None, gt=0)
 
@@ -695,7 +718,7 @@ class PortfolioHealthRequest(BaseModel):
 
 class CorrelationRequest(BaseModel):
     tickers: list[str] = Field(min_length=2, max_length=100)
-    weights: list[float] | None = None  # if provided, used for weighted avg correlation
+    weights: list[float] | None = Field(default=None, max_length=100)  # if provided, used for weighted avg correlation
     lookback_period: str = "3Y"
     auto_adjust: bool = True
     return_mode: ReturnMode = "log"
@@ -703,7 +726,7 @@ class CorrelationRequest(BaseModel):
 
 class YahooAllMetricsRequest(BaseModel):
     tickers: list[str] = Field(min_length=1, max_length=200)
-    asof: str | None = None
+    asof: IsoDate | None = None
     period: str = "3Y"  # Default to 3 years
     auto_adjust: bool = True
     frequency: VolFrequency = "daily"

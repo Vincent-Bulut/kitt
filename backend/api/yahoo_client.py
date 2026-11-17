@@ -19,9 +19,13 @@ import yfinance as yf
 
 _YF_LOCK = threading.RLock()
 
+# Per HTTP call to Yahoo. Calls are serialised, so a hanging call must not hold the lock indefinitely.
+TIMEOUT_SECONDS = 15
+
 
 def download(**kwargs: Any) -> pd.DataFrame | None:
     """`yf.download` with the same arguments, safe to call from several threads."""
+    kwargs.setdefault("timeout", TIMEOUT_SECONDS)
     with _YF_LOCK:
         df = yf.download(**kwargs)
         # Detach the result from yfinance's shared state before releasing the lock
@@ -30,6 +34,7 @@ def download(**kwargs: Any) -> pd.DataFrame | None:
 
 def history(ticker: str, **kwargs: Any) -> pd.DataFrame:
     """`yf.Ticker(ticker).history(...)`, safe to call from several threads."""
+    kwargs.setdefault("timeout", TIMEOUT_SECONDS)
     with _YF_LOCK:
         return yf.Ticker(ticker).history(**kwargs).copy()
 
