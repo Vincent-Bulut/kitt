@@ -58,14 +58,16 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 
 ### Backend (`backend/`)
 
-- **Entry point**: `backend/api/main.py` — creates the FastAPI `api` instance, registers CORS middleware, and mounts all routers.
+- **Entry point**: `backend/api/main.py` — creates the FastAPI `api` instance, registers CORS middleware (origins from `CORS_ORIGINS`), mounts all routers and exposes `/health`.
 - **Routers** (each in its own file under `backend/api/`):
   - `admin.py` — Portfolio CRUD (`/admin/portfolio`, `/admin/portfolios`)
   - `referential.py` — Asset listing, ETFBook static-data proxy, Excel upload/upsert into `assets` table (`/referential/`)
   - `analytics.py` — Yahoo Finance analytics: performance table, arithmetic return, cumulative returns series, drawdown analysis, annualized volatility, VaR/ES (`/analytics/yahoo/…`). All computation results are cached with `cachetools.TTLCache` (10 min).
-  - `etfbook_primary.py` — Async proxy to ETFBook dynamic data API (NAV/AUM time series), chunked by 50 ISINs (`/etfbook/analytics/dynamic-data`)
+  - `transactions.py` — Transaction CRUD and the computed positions view (weighted-average cost, P&L) (`/portfolios/{id}/…`, `/transactions/…`)
+  - `etfbook_primary.py` — Async proxy to ETFBook dynamic data API (NAV/AUM time series), chunked by 50 ISINs. Not mounted in `main.py`.
 - **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
 - **`utils.py`**: single helper `convert_to_timestamp()` used across analytics routes to normalise date strings.
+- **Tests** (`backend/tests/`): pure-function tests for analytics/positions/PEA parsing and HTTP tests that mount routers on a FastAPI app with `get_db` overridden to in-memory SQLite (`main.py` is not imported because it calls `create_all` on Postgres). Ruff and pytest config live in `backend/pyproject.toml`; CI is `.github/workflows/ci.yml`.
 
 ### Frontend (`frontend/`)
 
@@ -80,6 +82,7 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 |---|---|
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres credentials (also injected into the API container as `DATABASE_*`) |
 | `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` | pgAdmin login |
+| `CORS_ORIGINS` | Comma-separated origins allowed by the API (default `http://localhost,http://localhost:5173`) |
 
 **Backend** (`backend/.env`, git-ignored, never baked into the image):
 | Variable | Purpose |
