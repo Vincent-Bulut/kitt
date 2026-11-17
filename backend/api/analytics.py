@@ -1159,7 +1159,7 @@ def cumulative_returns_series_from_prices(
     end_ts: pd.Timestamp
 ) -> tuple[pd.Timestamp, float, pd.Series]:
     """
-    Renvoie (start_used_date, base_price, cum_return_series_decimal)
+    Return (start_used_date, base_price, cum_return_series_decimal).
     cum_return_series is indexed by date, values in decimal (0.10 = +10%).
     """
     s = prices.dropna().copy()
