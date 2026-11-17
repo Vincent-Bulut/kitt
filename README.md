@@ -78,7 +78,6 @@ frontend/             SvelteKit app (admin, analytics, portfolio, referential pa
 
 ```bash
 cp .env.example .env           # set Postgres / pgAdmin credentials
-touch backend/.env             # optional external API settings, see below
 docker compose up --build
 ```
 
@@ -117,7 +116,7 @@ uv run --project backend --env-file backend/.env python -m backend.migrate
 | File | Variables |
 |---|---|
 | `.env` (Compose) | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD`, `CORS_ORIGINS` |
-| `backend/.env` | `DATABASE_*` for local runs, optional reference-data API settings |
+| `backend/.env` | `DATABASE_*` for local runs |
 | `frontend/.env` | `PUBLIC_APP_API_URL` (e.g. `http://localhost:8000/`) |
 
 Secrets are never committed nor baked into images.

@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN useradd --system --no-create-home --uid 1001 app
 
 # Copie le code source (.env exclu via .dockerignore : les secrets sont fournis
-# au runtime par docker-compose via env_file)
+# au runtime par docker-compose via ses variables d'environnement)
 COPY --chown=app:app backend /app/backend/
 
 # Le venv créé par uv est prioritaire dans le PATH

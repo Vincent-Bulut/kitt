@@ -34,7 +34,7 @@ uv run --project backend ruff check backend
 uv run --project backend pytest
 ```
 
-The backend must be run from the **project root** (not from `backend/`) because imports use the `backend.api.*` package path and `PYTHONPATH` is set to `/app` in Docker. Nothing in the code loads `.env` files: variables come from `--env-file` locally and from `env_file` in Docker Compose.
+The backend must be run from the **project root** (not from `backend/`) because imports use the `backend.api.*` package path and `PYTHONPATH` is set to `/app` in Docker. Nothing in the code loads `.env` files: variables come from `--env-file` locally and from the `environment` section of Docker Compose.
 
 ### Frontend (SvelteKit + Vite)
 
@@ -66,14 +66,13 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 - **Entry point**: `backend/api/main.py` — creates the FastAPI `api` instance, registers CORS middleware (origins from `CORS_ORIGINS`), mounts all routers and exposes `/health`.
 - **Routers** (each in its own file under `backend/api/`):
   - `admin.py` — Portfolio CRUD (`/admin/portfolio`, `/admin/portfolios`)
-  - `referential.py` — Asset listing, ETFBook static-data proxy, Excel upload/upsert into `assets` table (`/referential/`)
+  - `referential.py` — Asset listing, Excel upload/upsert into `assets` table, Euronext PEA scraping (`/referential/`)
   - `analytics/` — Yahoo Finance analytics package (`/analytics/yahoo/…`), layered so that dependencies only point downwards:
     - `routes/{performance,risk,portfolio}.py` — thin routers, aggregated in `analytics/__init__.py` under the `/analytics` prefix
     - `services/{performance,risk,portfolio,optimization}.py` — `run_*` use cases: download data, call `quant`, cache results in `cachetools.TTLCache` (10 min)
     - `quant/` — pure functions (returns, drawdown, VaR/ES, optimization, PCA, regression, simulation): no FastAPI, no network, no cache; this is what the unit tests target
     - `market_data.py` — all Yahoo Finance / FX downloads; `schemas.py` — Pydantic models
   - `transactions.py` — Transaction CRUD and the computed positions view (weighted-average cost, P&L) (`/portfolios/{id}/…`, `/transactions/…`)
-  - `etfbook_primary.py` — Async proxy to ETFBook dynamic data API (NAV/AUM time series), chunked by 50 ISINs. Not mounted in `main.py`.
 - **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
 - **`utils.py`**: single helper `convert_to_timestamp()` used across analytics routes to normalise date strings.
 - **Tests** (`backend/tests/`): pure-function tests for analytics/positions/PEA parsing and HTTP tests that mount routers on a FastAPI app with `get_db` overridden to in-memory SQLite (no Postgres needed; migrations are exercised by the `migrations` CI job instead). Ruff and pytest config live in `backend/pyproject.toml`; CI is `.github/workflows/ci.yml`.
@@ -96,10 +95,6 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 **Backend** (`backend/.env`, git-ignored, never baked into the image):
 | Variable | Purpose |
 |---|---|
-| `ETFBOOK_API_BASE_URL` | Base URL for the ETFBook external API |
-| `ETFBOOK_REF_API_TOKEN` | Auth token for ETFBook API |
-| `ETFBOOK_REF_API_BASE_URL` | Path for static data endpoint |
-| `ETFBOOK_PRIMARY_TIME_SERIES` | Path for dynamic data endpoint |
 | `DATABASE_USER` / `DATABASE_PASSWORD` / `DATABASE_HOST` / `DATABASE_PORT` / `DATABASE_NAME` | DB connection for local runs (overridden by Compose in Docker) |
 | `ENV_KITT` | Set to `prod` in Docker (informational) |
 
