@@ -1,4 +1,3 @@
-import os
 from io import BytesIO
 
 import numpy as np
@@ -17,9 +16,6 @@ from backend.api.pea import find_new_isins, scrape_pea_etfs, to_csv
 
 router = APIRouter(prefix='/referential', tags=['REFERENTIAL'])
 
-ETFBOOK_REF_API_TOKEN = os.getenv("ETFBOOK_REF_API_TOKEN")
-ETFBOOK_REF_API_BASE_URL = os.getenv("ETFBOOK_REF_API_BASE_URL")
-ETFBOOK_API_BASE_URL = os.getenv("ETFBOOK_API_BASE_URL")
 
 @router.get("/")
 def say_hello():

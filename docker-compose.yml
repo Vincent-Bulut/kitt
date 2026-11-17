@@ -1,6 +1,6 @@
 name: kitt-prod
 
-# Secrets lus depuis ./.env (voir .env.example) et backend/.env (ETFBook)
+# Secrets lus depuis ./.env (voir .env.example)
 
 services:
   postgres:
@@ -46,7 +46,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file: backend/.env # variables ETFBook (non embarquées dans l'image)
     environment: # prioritaire sur env_file
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432
