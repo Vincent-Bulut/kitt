@@ -22,6 +22,45 @@ jobs:
       - name: Tests
         run: uv run --project backend pytest -q
 
+  migrations:
+    name: Database migrations (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kitt
+          POSTGRES_PASSWORD: kitt
+          POSTGRES_DB: kitt
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kitt -d kitt"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_USER: kitt
+      DATABASE_PASSWORD: kitt
+      DATABASE_HOST: localhost
+      DATABASE_PORT: 5432
+      DATABASE_NAME: kitt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --project backend --locked
+      - name: Upgrade to head
+        run: uv run --project backend python -m backend.migrate
+      - name: Models and migrations are in sync
+        run: uv run --project backend alembic -c backend/alembic.ini check
+      - name: Downgrade / upgrade round trip
+        run: |
+          uv run --project backend alembic -c backend/alembic.ini downgrade base
+          uv run --project backend alembic -c backend/alembic.ini upgrade head
+
   frontend:
     name: Frontend (build)
     runs-on: ubuntu-latest

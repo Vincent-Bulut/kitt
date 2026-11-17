@@ -1,10 +1,8 @@
 import datetime
 import enum
 
-from sqlalchemy import Date, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Date, Enum, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
-from backend.api.database import engine
 
 
 class Base(DeclarativeBase):
@@ -47,7 +45,7 @@ class Assets(Base):
     isin: Mapped[str] = mapped_column(String(12), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     currency: Mapped[str] = mapped_column(String, nullable=False)
-    fees: Mapped[float] = mapped_column(Float, nullable=True)
+    fees: Mapped[float | None] = mapped_column(Numeric(8, 6, asdecimal=False), nullable=True)
     asset_class: Mapped[str] = mapped_column(String, nullable=True)
     geo_focus: Mapped[str] = mapped_column(String, nullable=True)
     asset_category_lv1: Mapped[str] = mapped_column(String, nullable=True)
@@ -99,10 +97,10 @@ class Transaction(Base):
     side: Mapped[TransactionSide] = mapped_column(
         Enum(TransactionSide, name="transaction_side"), nullable=False
     )
-    quantity: Mapped[float] = mapped_column(Float, nullable=False)
-    price: Mapped[float] = mapped_column(Float, nullable=False)
-    transaction_fee: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)
-    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity: Mapped[float] = mapped_column(Numeric(20, 8, asdecimal=False), nullable=False)
+    price: Mapped[float] = mapped_column(Numeric(20, 8, asdecimal=False), nullable=False)
+    transaction_fee: Mapped[float | None] = mapped_column(Numeric(20, 6, asdecimal=False), nullable=True, default=0.0)
+    amount: Mapped[float | None] = mapped_column(Numeric(20, 6, asdecimal=False), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
 
     portfolio: Mapped["Portfolio"] = relationship(
@@ -115,6 +113,3 @@ class Transaction(Base):
         lazy="joined",
     )
 
-
-if __name__ == '__main__':
-    Base.metadata.create_all(engine)
