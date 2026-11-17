@@ -1,12 +1,11 @@
 from datetime import date as date_type
 
 import pandas as pd
-import yfinance as yf
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.api import model, schema
+from backend.api import model, schema, yahoo_client
 from backend.api.database import get_db
 
 router = APIRouter(tags=["TRANSACTIONS"])
@@ -110,7 +109,7 @@ def _fetch_last_prices(symbols: list[str]) -> tuple[dict[str, float], dict[str, 
         return prices, errors, asof_used
 
     try:
-        df = yf.download(
+        df = yahoo_client.download(
             tickers=symbols,
             period="5d",
             interval="1d",

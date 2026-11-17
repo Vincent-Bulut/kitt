@@ -3,10 +3,10 @@
 This is the only module of the analytics package doing network I/O."""
 
 import pandas as pd
-import yfinance as yf
-from cachetools import TTLCache
 
+from backend.api import yahoo_client
 from backend.api.analytics.schemas import VolFrequency
+from backend.api.cache import TTLStore
 
 _INTERVAL_MAP = {
     "daily": "1d",
@@ -15,7 +15,7 @@ _INTERVAL_MAP = {
 }
 
 # Quote currency per ticker barely ever changes: keep it for a day
-CURRENCY_CACHE = TTLCache(maxsize=5000, ttl=86400)
+CURRENCY_CACHE = TTLStore(maxsize=5000, ttl=86400)
 
 PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,
@@ -36,7 +36,7 @@ def download_prices_close(
     fetch_start = (start_ts - pd.Timedelta(days=10)).date().isoformat()
     fetch_end = (end_ts + pd.Timedelta(days=1)).date().isoformat()
 
-    df = yf.download(
+    df = yahoo_client.download(
         tickers=tickers,
         start=fetch_start,
         end=fetch_end,
@@ -82,7 +82,7 @@ def download_close_multi(
     end_ts: pd.Timestamp,
     auto_adjust: bool,
 ) -> pd.DataFrame:
-    df = yf.download(
+    df = yahoo_client.download(
         tickers=tickers,
         start=(start_ts - pd.Timedelta(days=5)).date().isoformat(),
         end=(end_ts + pd.Timedelta(days=1)).date().isoformat(),
@@ -131,7 +131,7 @@ def download_close_multi_interval(
     fetch_start = (start_ts - pd.Timedelta(days=60)).date().isoformat()
     fetch_end = (end_ts + pd.Timedelta(days=5)).date().isoformat()
 
-    df = yf.download(
+    df = yahoo_client.download(
         tickers=tickers,
         start=fetch_start,
         end=fetch_end,
@@ -179,7 +179,7 @@ def download_close_daily_multi(
     fetch_start = (start_ts - pd.Timedelta(days=60)).date().isoformat()
     fetch_end = (end_ts + pd.Timedelta(days=5)).date().isoformat()
 
-    df = yf.download(
+    df = yahoo_client.download(
         tickers=tickers,
         start=fetch_start,
         end=fetch_end,
@@ -218,14 +218,12 @@ _MINOR_CURRENCY_UNITS = {"GBp": ("GBP", 0.01), "GBX": ("GBP", 0.01), "ZAc": ("ZA
 
 def _ticker_currency(ticker: str) -> str | None:
     """Quote currency reported by Yahoo (may be a minor unit such as 'GBp')."""
-    if ticker in CURRENCY_CACHE:
-        return CURRENCY_CACHE[ticker]
-    try:
-        currency = yf.Ticker(ticker).fast_info["currency"]
-    except Exception:
-        currency = None
+    cached = CURRENCY_CACHE.get(ticker)
+    if cached is not None:
+        return cached
+    currency = yahoo_client.quote_currency(ticker)
     if currency:
-        CURRENCY_CACHE[ticker] = currency
+        CURRENCY_CACHE.set(ticker, currency)
     return currency
 
 

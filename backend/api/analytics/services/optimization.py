@@ -4,7 +4,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from cachetools import TTLCache
 
 from backend.api.analytics.market_data import PERIOD_DAYS, download_close_daily_multi
 from backend.api.analytics.quant.optimization import (
@@ -18,12 +17,13 @@ from backend.api.analytics.quant.optimization import (
     optimize_with_bounds,
     portfolio_perf,
 )
+from backend.api.cache import TTLStore
 
-EF_CACHE = TTLCache(maxsize=200, ttl=600)
+EF_CACHE = TTLStore(maxsize=200, ttl=600)
 
-SAMPLER_CACHE = TTLCache(maxsize=100, ttl=600)
+SAMPLER_CACHE = TTLStore(maxsize=100, ttl=600)
 
-BL_CACHE = TTLCache(maxsize=200, ttl=600)
+BL_CACHE = TTLStore(maxsize=200, ttl=600)
 
 
 def run_efficient_frontier(
@@ -62,8 +62,9 @@ def run_efficient_frontier(
         int(n_points),
         end_ts.date().isoformat(),
     )
-    if cache_key in EF_CACHE:
-        return EF_CACHE[cache_key]
+    cached = EF_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -153,7 +154,7 @@ def run_efficient_frontier(
         "current_portfolio": current_desc,
         "errors": errors,
     }
-    EF_CACHE[cache_key] = out
+    EF_CACHE.set(cache_key, out)
     return out
 
 
@@ -363,8 +364,9 @@ def run_portfolio_sampler(
         int(seed),
         end_ts.date().isoformat(),
     )
-    if cache_key in SAMPLER_CACHE:
-        return SAMPLER_CACHE[cache_key]
+    cached = SAMPLER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     close = download_close_daily_multi(uniq_tickers, start_ts, end_ts, auto_adjust)
     if close.empty:
@@ -483,5 +485,5 @@ def run_portfolio_sampler(
         "cloud": cloud,
         "errors": errors,
     }
-    SAMPLER_CACHE[cache_key] = out
+    SAMPLER_CACHE.set(cache_key, out)
     return out

@@ -69,9 +69,12 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
   - `referential.py` — Asset listing, Excel upload/upsert into `assets` table, Euronext PEA scraping (`/referential/`)
   - `analytics/` — Yahoo Finance analytics package (`/analytics/yahoo/…`), layered so that dependencies only point downwards:
     - `routes/{performance,risk,portfolio}.py` — thin routers, aggregated in `analytics/__init__.py` under the `/analytics` prefix
-    - `services/{performance,risk,portfolio,optimization}.py` — `run_*` use cases: download data, call `quant`, cache results in `cachetools.TTLCache` (10 min)
+    - `services/{performance,risk,portfolio,optimization}.py` — `run_*` use cases: download data, call `quant`, cache results in a `TTLStore` (10 min)
     - `quant/` — pure functions (returns, drawdown, VaR/ES, optimization, PCA, regression, simulation): no FastAPI, no network, no cache; this is what the unit tests target
     - `market_data.py` — all Yahoo Finance / FX downloads; `schemas.py` — Pydantic models
+- **Concurrency rules** (endpoints are sync `def`, so FastAPI runs them in parallel threads):
+  - Never call `yfinance` directly: go through `backend/api/yahoo_client.py` (`download`, `history`, `quote_currency`). yfinance keeps results in module-level state that concurrent calls overwrite; the client serialises calls behind a lock. `test_concurrency.py` reproduces the race.
+  - Never use a bare `cachetools.TTLCache` or the `if key in cache: return cache[key]` idiom: use `backend/api/cache.py::TTLStore` (`get` / `set` under a lock).
   - `transactions.py` — Transaction CRUD and the computed positions view (weighted-average cost, P&L) (`/portfolios/{id}/…`, `/transactions/…`)
 - **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
 - **`utils.py`**: single helper `convert_to_timestamp()` used across analytics routes to normalise date strings.
