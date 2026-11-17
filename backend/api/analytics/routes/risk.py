@@ -1,8 +1,12 @@
 """Risk endpoints."""
 
+from typing import Annotated
+
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.api.analytics.routes.params import check_date_range, parse_confidence_levels, parse_tickers
 from backend.api.analytics.schemas import (
+    IsoDate,
     MonteCarloRequest,
     MonteCarloResponse,
     PortfolioVaREsRequest,
@@ -18,18 +22,17 @@ router = APIRouter()
 
 @router.get("/yahoo/var-es", response_model=YahooVaREsResponse)
 def yahoo_var_es_get(
-    tickers: str = Query(..., description="Comma-separated: AAPL,SPY,AIR.PA"),
-    start_date: str = Query(..., description="YYYY-MM-DD"),
-    end_date: str = Query(..., description="YYYY-MM-DD"),
+    tickers: Annotated[str, Query(description="Comma-separated: AAPL,SPY,AIR.PA")],
+    start_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
+    end_date: Annotated[IsoDate, Query(description="YYYY-MM-DD")],
     auto_adjust: bool = True,
     return_mode: ReturnMode = Query("arith", description="arith|log"),
     confidence_levels: str = Query("0.95,0.99", description="Comma-separated, e.g. 0.95,0.99"),
 ):
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers is required")
+    ticker_list = parse_tickers(tickers, max_tickers=200)
+    check_date_range(start_date, end_date)
 
-    cl_list = [float(x.strip()) for x in confidence_levels.split(",") if x.strip()]
+    cl_list = parse_confidence_levels(confidence_levels)
 
     return run_var_es(
         tickers=ticker_list,
