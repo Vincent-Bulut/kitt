@@ -1141,10 +1141,14 @@ def _download_prices_close(
 
 
 def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
+    """
+    Returns (price, date) for the last available price <= target.
+    """
     s = series.loc[:target].dropna()
     if s.empty:
         return None, None
-    price = float(s.iloc[-1].item()) if hasattr(s.iloc[-1], "item") else float(s.iloc[-1])
+    v = s.iloc[-1]
+    price = float(v.item()) if hasattr(v, "item") else float(v)
     return price, s.index[-1]
 
 
@@ -1486,16 +1490,6 @@ def yahoo_drawdowns_post(req: YahooDrawdownRequest):
 # Helpers
 # =========================
 
-def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
-    """
-    Returns (price, date) for the last available price <= target.
-    """
-    s = series.loc[:target].dropna()
-    if s.empty:
-        return None, None
-    v = s.iloc[-1]
-    price = float(v.item()) if hasattr(v, "item") else float(v)
-    return price, s.index[-1]
 
 
 def _download_close_multi_interval(
@@ -1708,13 +1702,6 @@ def yahoo_annualized_volatility_post(req: YahooAnnVolRequest):
 # Helpers (download + dates)
 # =========================
 
-def _nearest_prev_price(series: pd.Series, target: pd.Timestamp) -> Tuple[Optional[float], Optional[pd.Timestamp]]:
-    s = series.loc[:target].dropna()
-    if s.empty:
-        return None, None
-    v = s.iloc[-1]
-    price = float(v.item()) if hasattr(v, "item") else float(v)
-    return price, s.index[-1]
 
 
 def _download_close_daily_multi(
