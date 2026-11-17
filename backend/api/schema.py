@@ -1,12 +1,7 @@
-from pydantic import BaseModel, Field, model_validator
-from enum import Enum, IntEnum
 from datetime import date
-from typing import List, Optional
+from enum import Enum
 
-class PriorityEnum(IntEnum):
-    LOW = 3
-    MEDIUM = 2
-    HIGH = 1
+from pydantic import BaseModel, Field, model_validator
 
 
 class TransactionSide(str, Enum):
@@ -24,7 +19,7 @@ class Portfolio(BaseModel):
     @model_validator(mode="after")
     def check_dates(self):
         if self.end_date is not None and self.end_date < self.start_date:
-            raise ValueError("end_date doit être postérieure à start_date")
+            raise ValueError("end_date must be on or after start_date")
         return self
 
 
@@ -93,4 +88,4 @@ class PositionViewResponse(BaseModel):
     total_pnl: float
     total_fees: float
     estimated_ter_cost_annual: float
-    rows: List[PositionViewRow]
+    rows: list[PositionViewRow]

@@ -54,6 +54,7 @@ services:
       DATABASE_USER: ${POSTGRES_USER}
       DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
       ENV_KITT: prod
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://localhost:5173}
 
   webapp:
     image: ghcr.io/vincent-bulut/kitt-frontend:latest

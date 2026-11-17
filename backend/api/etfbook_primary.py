@@ -1,11 +1,10 @@
 import os
-import requests
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import JSONResponse
-from typing import List, Optional, Any, Dict
-import pandas as pd
-import numpy as np
+from typing import Any
+
 import httpx
+import numpy as np
+import pandas as pd
+from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix='/etfbook/analytics', tags=['ETFBOOK'])
 
@@ -24,13 +23,13 @@ class DynamicDataService:
         self.headers = headers
         self.isin_flow_chunk_size = isin_flow_chunk_size
 
-    async def get_dynamic_data(self, list_isins: List[str], b_milion: bool = False) -> pd.DataFrame:
+    async def get_dynamic_data(self, list_isins: list[str], b_milion: bool = False) -> pd.DataFrame:
         chunked_list = [
             list_isins[i : i + self.isin_flow_chunk_size]
             for i in range(0, len(list_isins), self.isin_flow_chunk_size)
         ]
 
-        all_dataframes: List[pd.DataFrame] = []
+        all_dataframes: list[pd.DataFrame] = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             for chunk in chunked_list:
@@ -44,13 +43,13 @@ class DynamicDataService:
                     )
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as e:
-                    # On remonte l'erreur upstream avec un message clair
+                    # Surface the upstream error with a clear message
                     raise HTTPException(
                         status_code=502,
                         detail=f"Upstream error ({e.response.status_code}) on dynamic-data call",
-                    )
+                    ) from e
                 except httpx.RequestError:
-                    raise HTTPException(status_code=502, detail="Upstream unreachable for dynamic-data")
+                    raise HTTPException(status_code=502, detail="Upstream unreachable for dynamic-data") from None
 
                 data = resp.json()
                 df = pd.DataFrame(data)
@@ -85,7 +84,7 @@ class DynamicDataService:
                 .dt.strftime("%Y-%m-%d")
             )
 
-        # 4) drop cols si présentes
+        # 4) drop columns if present
         drop_cols = ["createdAt", "modifiedAt", "modifiedBy", "createdBy"]
         final_df.drop(columns=[c for c in drop_cols if c in final_df.columns], inplace=True)
 
@@ -109,7 +108,7 @@ dynamic_service = DynamicDataService(
 
 @router.get("/dynamic-data")
 async def get_etfbook_dynamic_data(
-    isins: List[str] = Query(..., description="Repeated query param: ?isins=...&isins=..."),
+    isins: list[str] = Query(..., description="Repeated query param: ?isins=...&isins=..."),
     b_milion: bool = Query(False, description="If true, sharesOut & aumUsd are returned in millions"),
 ):
     df = await dynamic_service.get_dynamic_data(isins, b_milion=b_milion)
@@ -121,5 +120,5 @@ async def get_etfbook_dynamic_data(
     df = df.replace([np.inf, -np.inf], np.nan).astype(object)
     df = df.where(pd.notnull(df), None)
 
-    records: List[Dict[str, Any]] = df.to_dict(orient="records")
+    records: list[dict[str, Any]] = df.to_dict(orient="records")
     return {"data": records, "count": len(records)}

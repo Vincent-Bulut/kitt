@@ -1,6 +1,7 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-import os
 
 DB_USER = os.environ.get("DATABASE_USER", "admin")
 DB_PASSWORD = os.environ.get("DATABASE_PASSWORD")
