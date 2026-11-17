@@ -63,9 +63,11 @@ def test_portfolio_rejects_end_before_start(client):
     assert resp.status_code == 422
 
 
-def test_duplicate_portfolio_name_returns_400(client):
+def test_duplicate_portfolio_name_returns_409_without_db_details(client):
     client.post("/admin/portfolio", json=PORTFOLIO)
-    assert client.post("/admin/portfolio", json=PORTFOLIO).status_code == 400
+    resp = client.post("/admin/portfolio", json=PORTFOLIO)
+    assert resp.status_code == 409
+    assert "UNIQUE" not in resp.text and "portfolio.name" not in resp.text  # no SQL leaked to the client
 
 
 @pytest.mark.parametrize("method", ["get", "delete"])

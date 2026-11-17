@@ -3,10 +3,13 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api import observability
 from backend.api.admin import router as admin_router
 from backend.api.analytics import router as analytics_router
 from backend.api.referential import router as referential_router
 from backend.api.transactions import router as transactions_router
+
+observability.configure_logging()
 
 api = FastAPI(
     title="KITT API",
@@ -28,6 +31,8 @@ api.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+observability.install(api)
 
 api.include_router(admin_router)
 api.include_router(referential_router)
