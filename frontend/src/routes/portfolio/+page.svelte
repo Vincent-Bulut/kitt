@@ -558,7 +558,10 @@
         volatility: number;
         sharpe: number;
         avg_correlation: number;
+        diversification_ratio: number;
         composite_score: number;
+        observations: number;
+        start_date_used: string;
     };
 
     type SamplerCloudPoint = {
@@ -566,6 +569,7 @@
         expected_return: number;
         sharpe: number;
         avg_correlation: number;
+        diversification_ratio: number;
         composite_score: number;
         tickers: string[];
         weights: number[];
@@ -583,6 +587,9 @@
         risk_free_rate: number;
         diversification_weight: number;
         optimization: "max_sharpe" | "equal_weight";
+        min_history_coverage: number;
+        min_observations: number;
+        excluded: Record<string, string>;
         top_by_composite: SampledPortfolio[];
         top_by_sharpe: SampledPortfolio[];
         cloud: SamplerCloudPoint[];
@@ -600,6 +607,8 @@
     let samplerMinWeight = 0.0;
     let samplerOpt: "max_sharpe" | "equal_weight" = "max_sharpe";
     let samplerSeed = 42;
+    let samplerMinCoverage = 0.8;
+    let samplerExcludeLeveraged = true;
     let samplerRankBy: "composite" | "sharpe" = "composite";
     let isFetchingSampler = false;
     let samplerError = "";
@@ -909,7 +918,9 @@
                 max_weight: samplerMaxWeight,
                 min_weight: samplerMinWeight,
                 optimization: samplerOpt,
-                seed: samplerSeed
+                seed: samplerSeed,
+                min_history_coverage: samplerMinCoverage,
+                exclude_leveraged: samplerExcludeLeveraged
             };
             const res = await instance.post<PortfolioSamplerResult>("/analytics/yahoo/portfolio-sampler", payload);
             samplerResult = res.data;
@@ -4677,6 +4688,15 @@
                                 <span class="label">Seed</span>
                                 <input class="input mono xsmallInput" type="number" step="1" bind:value={samplerSeed}/>
                             </label>
+                            <label class="field inlineField" title="Each asset and each portfolio must have prices on at least this share of the lookback window">
+                                <span class="label">Min history</span>
+                                <input class="input mono xsmallInput" type="number" min="0.1" max="1" step="0.05"
+                                       bind:value={samplerMinCoverage}/>
+                            </label>
+                            <label class="field inlineField" title="Leave out leveraged and inverse ETFs, identified by name in the referential">
+                                <span class="label">Exclude leveraged / inverse</span>
+                                <input type="checkbox" bind:checked={samplerExcludeLeveraged}/>
+                            </label>
                             <button class="btn primary xsmall" on:click={runSampler}
                                     disabled={isFetchingSampler || !assets || assets.length < samplerPortfolioSize}>
                                 {isFetchingSampler ? "Sampling…" : "Run sampler"}
@@ -4684,7 +4704,7 @@
                         </div>
 
                         <div class="soft xsmall mono" style="margin-bottom: 6px;">
-                            Universe: {assets.length} asset(s) from referential · score = sharpe − λ × avg_correlation · weight per asset ∈ [{(samplerMinWeight * 100).toFixed(0)}%, {(samplerMaxWeight * 100).toFixed(0)}%]
+                            Universe: {assets.length} asset(s) from referential · score = sharpe + λ × ln(diversification ratio) · history ≥ {(samplerMinCoverage * 100).toFixed(0)}% of the window{samplerExcludeLeveraged ? " · leveraged / inverse ETFs excluded" : ""} · weight per asset ∈ [{(samplerMinWeight * 100).toFixed(0)}%, {(samplerMaxWeight * 100).toFixed(0)}%]
                         </div>
 
                         {#if samplerError}
@@ -4843,6 +4863,10 @@
                                             <div class="mcStatValue mono {selectedSamplerPoint.avg_correlation > 0.7 ? 'redText' : selectedSamplerPoint.avg_correlation < 0.3 ? 'greenText' : ''}">{selectedSamplerPoint.avg_correlation.toFixed(2)}</div>
                                         </div>
                                         <div class="mcStat">
+                                            <div class="mcStatLabel">Diversification ratio</div>
+                                            <div class="mcStatValue mono">{selectedSamplerPoint.diversification_ratio.toFixed(2)}</div>
+                                        </div>
+                                        <div class="mcStat">
                                             <div class="mcStatLabel">Composite score</div>
                                             <div class="mcStatValue mono bold">{selectedSamplerPoint.composite_score.toFixed(2)}</div>
                                         </div>
@@ -4876,8 +4900,10 @@
                                         <th>Ann. return</th>
                                         <th>Ann. vol</th>
                                         <th>Sharpe</th>
-                                        <th>Avg ρ</th>
+                                        <th title="Unweighted average pairwise correlation (informative)">Avg ρ</th>
+                                        <th title="Σ wᵢσᵢ / σₚ — 1 = no diversification">Div. ratio</th>
                                         <th>Composite</th>
+                                        <th title="Common daily returns the statistics are estimated on">Window</th>
                                     </tr>
                                     </thead>
                                     <tbody>
@@ -4901,7 +4927,9 @@
                                             <td><span
                                                     class="mono {p.avg_correlation > 0.7 ? 'redText' : p.avg_correlation < 0.3 ? 'greenText' : ''}">{p.avg_correlation.toFixed(2)}</span>
                                             </td>
+                                            <td><span class="mono">{p.diversification_ratio.toFixed(2)}</span></td>
                                             <td><span class="mono bold">{p.composite_score.toFixed(2)}</span></td>
+                                            <td><span class="mono soft">{p.start_date_used} · {p.observations}d</span></td>
                                         </tr>
                                     {/each}
                                     </tbody>
@@ -4913,11 +4941,20 @@
                                 · Rf = {formatPct(samplerResult.risk_free_rate)} · λ
                                 = {samplerResult.diversification_weight} · {samplerResult.start_date_used}
                                 → {samplerResult.end_date_used}
+                                · ≥ {samplerResult.min_observations} common days per portfolio
                                 {#if Object.keys(samplerResult.errors).length > 0}
-                                    · Skipped
-                                    tickers: {Object.keys(samplerResult.errors).slice(0, 8).join(", ")}{Object.keys(samplerResult.errors).length > 8 ? "…" : ""}
+                                    · No data:
+                                    {Object.keys(samplerResult.errors).slice(0, 8).join(", ")}{Object.keys(samplerResult.errors).length > 8 ? "…" : ""}
                                 {/if}
                             </div>
+                            {#if Object.keys(samplerResult.excluded).length > 0}
+                                <details class="mcFootnote soft">
+                                    <summary>{Object.keys(samplerResult.excluded).length} asset(s) excluded from the universe</summary>
+                                    {#each Object.entries(samplerResult.excluded) as [ticker, reason]}
+                                        <div class="mono">{ticker} — {reason}</div>
+                                    {/each}
+                                </details>
+                            {/if}
                         {:else if !isFetchingSampler}
                             <div class="emptyState">Click "Run sampler" to draw {samplerNSimulations}
                                 random {samplerPortfolioSize}-asset portfolios from your referential and rank them by

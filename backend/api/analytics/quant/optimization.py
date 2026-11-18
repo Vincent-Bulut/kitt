@@ -165,6 +165,20 @@ def black_litterman_posterior(
     return implied, posterior
 
 
+def diversification_ratio(weights: np.ndarray, cov: np.ndarray) -> float:
+    """sum(w_i * sigma_i) / sigma_p (Choueifaty & Coignard).
+
+    1 for a single asset or perfectly correlated assets, higher the more the weighted assets offset
+    each other. Uses the actual weights, unlike an average of pairwise correlations.
+    """
+    w = np.asarray(weights, dtype=float)
+    sigma = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    port_vol = float(np.sqrt(max(float(w @ cov @ w), 0.0)))
+    if port_vol <= 0:
+        return 1.0
+    return float(w @ sigma) / port_vol
+
+
 def avg_off_diag_correlation(corr_mat: np.ndarray) -> float:
     n = corr_mat.shape[0]
     if n < 2:

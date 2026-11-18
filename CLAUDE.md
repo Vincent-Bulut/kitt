@@ -77,6 +77,7 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 - **Concurrency rules** (endpoints are sync `def`, so FastAPI runs them in parallel threads):
   - Never call `yfinance` directly: go through `backend/api/yahoo_client.py` (`download`, `history`, `quote_currency`). yfinance keeps results in module-level state that concurrent calls overwrite; the client serialises calls behind a lock. `test_concurrency.py` reproduces the race.
   - Never use a bare `cachetools.TTLCache` or the `if key in cache: return cache[key]` idiom: use `backend/api/cache.py::TTLStore` (`get` / `set` under a lock).
+- **Portfolio sampler** (`services/optimization.py::run_portfolio_sampler`): score = Sharpe + λ·ln(diversification ratio), DR computed with the actual weights; assets and each sampled portfolio must cover `min_history_coverage` (default 80%) of the lookback window; leveraged / inverse ETFs are excluded by default, detected from referential names (`analytics/instruments.py`) by the route.
 - **Memory rules** (the API container is limited to 1.5 GB, `restart: unless-stopped`):
   - Caches of analytics results are bounded in estimated MB (`TTLStore(ttl=..., max_mb=...)`, ~256 MB in total), not in entries: one result weighs 1 KB to several MB.
   - Never allocate `n_sims x horizon x n_assets` arrays at once: `quant/simulation.py` works in chunks (bit-identical results). `MonteCarloRequest` caps `n_simulations x horizon_days` at 10M points.

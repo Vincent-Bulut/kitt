@@ -1,8 +1,11 @@
 """Portfolio diagnostics and construction endpoints."""
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
+from backend.api import model
+from backend.api.analytics.instruments import is_leveraged_or_inverse
 from backend.api.analytics.schemas import (
     BlackLittermanRequest,
     BlackLittermanResponse,
@@ -31,6 +34,7 @@ from backend.api.analytics.services.portfolio import (
     run_portfolio_health,
     run_portfolio_regression,
 )
+from backend.api.database import get_db
 
 router = APIRouter()
 
@@ -117,7 +121,11 @@ def yahoo_black_litterman_post(req: BlackLittermanRequest):
 
 
 @router.post("/yahoo/portfolio-sampler", response_model=PortfolioSamplerResponse)
-def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest):
+def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest, db: Session = Depends(get_db)):
+    excluded: dict[str, str] = {}
+    if req.exclude_leveraged:
+        names = dict(db.query(model.Assets.symbol, model.Assets.name).filter(model.Assets.symbol.in_(req.tickers)))
+        excluded = {t: "Leveraged or inverse product" for t in req.tickers if is_leveraged_or_inverse(names.get(t))}
     try:
         return run_portfolio_sampler(
             tickers=req.tickers,
@@ -132,6 +140,8 @@ def yahoo_portfolio_sampler_post(req: PortfolioSamplerRequest):
             min_weight=req.min_weight,
             optimization=req.optimization,
             seed=req.seed,
+            min_history_coverage=req.min_history_coverage,
+            excluded=excluded,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
