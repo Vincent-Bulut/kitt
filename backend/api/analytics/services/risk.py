@@ -14,11 +14,11 @@ from backend.api.analytics.quant.simulation import business_dates_forward, simul
 from backend.api.analytics.schemas import ReturnMode
 from backend.api.cache import TTLStore
 
-RISK_CACHE = TTLStore(maxsize=2000, ttl=600)
+RISK_CACHE = TTLStore(ttl=600, max_mb=32)
 
-MC_CACHE = TTLStore(maxsize=500, ttl=600)
+MC_CACHE = TTLStore(ttl=600, max_mb=32)
 
-PORTVAR_CACHE = TTLStore(maxsize=500, ttl=600)
+PORTVAR_CACHE = TTLStore(ttl=600, max_mb=16)
 
 
 def run_var_es(

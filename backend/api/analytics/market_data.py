@@ -15,7 +15,7 @@ _INTERVAL_MAP = {
 }
 
 # Quote currency per ticker barely ever changes: keep it for a day
-CURRENCY_CACHE = TTLStore(maxsize=5000, ttl=86400)
+CURRENCY_CACHE = TTLStore(ttl=86400, maxsize=5000)
 
 PERIOD_DAYS = {
     "1M": 30, "3M": 90, "6M": 180,

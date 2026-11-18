@@ -12,13 +12,13 @@ from backend.api.analytics.quant.regression import REGRESSION_ANNUALIZATION, REG
 from backend.api.analytics.schemas import PCAMatrixType, ReturnMode
 from backend.api.cache import TTLStore
 
-CORR_CACHE = TTLStore(maxsize=500, ttl=600)
+CORR_CACHE = TTLStore(ttl=600, max_mb=8)
 
-HEALTH_CACHE = TTLStore(maxsize=500, ttl=600)
+HEALTH_CACHE = TTLStore(ttl=600, max_mb=8)
 
-PCA_CACHE = TTLStore(maxsize=200, ttl=600)
+PCA_CACHE = TTLStore(ttl=600, max_mb=16)
 
-REGRESSION_CACHE = TTLStore(maxsize=500, ttl=600)
+REGRESSION_CACHE = TTLStore(ttl=600, max_mb=16)
 
 
 def run_correlation(
