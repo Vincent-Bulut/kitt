@@ -75,3 +75,21 @@ def test_malformed_excel_gives_generic_400(client):
     resp = _upload(client, b"definitely not an xlsx file")
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Invalid or unreadable Excel file."
+
+
+def test_yfinance_errors_are_logged_as_warnings_but_app_errors_stay_errors(capsys):
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    try:
+        observability.configure_logging()
+        logging.getLogger("yfinance").error("$FOO.PA: possibly delisted; no timezone found")
+        logging.getLogger("backend.api").error("real application failure")
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+    lines = capsys.readouterr().err.splitlines()
+    yf_line = next(line for line in lines if "possibly delisted" in line)
+    app_line = next(line for line in lines if "real application failure" in line)
+    assert "level=WARNING logger=yfinance" in yf_line
+    assert "level=ERROR logger=backend.api" in app_line
