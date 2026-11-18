@@ -27,8 +27,25 @@ class _RequestIdFilter(logging.Filter):
         return True
 
 
+class _DowngradeLibraryErrors(logging.Filter):
+    """Log third-party data-provider errors as WARNING.
+
+    yfinance logs every unknown or delisted ticker at ERROR ("possibly delisted", "Quote not
+    found"). The application already handles these (they are returned in the response `errors`),
+    so they are data-quality warnings, not incidents: ERROR stays reserved for application failures.
+    """
+
+    LOGGERS = ("yfinance",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.ERROR and record.name.split(".")[0] in self.LOGGERS:
+            record.levelno, record.levelname = logging.WARNING, "WARNING"
+        return True
+
+
 def configure_logging() -> None:
     handler = logging.StreamHandler()
+    handler.addFilter(_DowngradeLibraryErrors())
     handler.addFilter(_RequestIdFilter())
     handler.setFormatter(
         logging.Formatter(
