@@ -372,8 +372,11 @@ class SampledPortfolio(BaseModel):
     expected_return: float
     volatility: float
     sharpe: float
-    avg_correlation: float
-    composite_score: float
+    avg_correlation: float          # informative only (unweighted)
+    diversification_ratio: float    # sum(w_i * sigma_i) / sigma_p, >= 1 for long-only portfolios
+    composite_score: float          # sharpe + lambda * ln(diversification_ratio)
+    observations: int               # common daily returns the statistics were estimated on
+    start_date_used: str
 
 
 class SamplerCloudPoint(BaseModel):
@@ -381,6 +384,7 @@ class SamplerCloudPoint(BaseModel):
     expected_return: float
     sharpe: float
     avg_correlation: float
+    diversification_ratio: float
     composite_score: float
     tickers: list[str]
     weights: list[float]
@@ -398,6 +402,9 @@ class PortfolioSamplerResponse(BaseModel):
     risk_free_rate: float
     diversification_weight: float
     optimization: SamplerOptimization
+    min_history_coverage: float
+    min_observations: int           # common daily returns required per portfolio
+    excluded: dict[str, str] = Field(default_factory=dict)  # ticker -> reason (leveraged/inverse, short history)
     top_by_composite: list[SampledPortfolio]
     top_by_sharpe: list[SampledPortfolio]
     cloud: list[SamplerCloudPoint]
@@ -417,6 +424,11 @@ class PortfolioSamplerRequest(BaseModel):
     min_weight: float = Field(default=0.0, ge=0.0, le=0.5)
     optimization: SamplerOptimization = "max_sharpe"
     seed: int = 42
+    # Each asset, and each sampled portfolio, must have data on at least this share of the business
+    # days of the lookback window (otherwise statistics are annualised from a few months of data)
+    min_history_coverage: float = Field(default=0.8, ge=0.1, le=1.0)
+    # Leave out leveraged / inverse ETFs (identified by name in the referential)
+    exclude_leveraged: bool = True
 
 
 class EfficientFrontierRequest(BaseModel):

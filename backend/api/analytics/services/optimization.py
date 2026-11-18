@@ -10,6 +10,7 @@ from backend.api.analytics.quant.optimization import (
     avg_off_diag_correlation,
     black_litterman_posterior,
     build_portfolio_descriptor,
+    diversification_ratio,
     max_sharpe_portfolio,
     min_variance_for_target,
     min_variance_portfolio,
@@ -330,12 +331,23 @@ def run_portfolio_sampler(
     min_weight: float,
     optimization: str,
     seed: int,
+    min_history_coverage: float = 0.8,
+    excluded: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    # de-dup tickers while preserving order
+    """Draw random portfolios from the universe and rank them.
+
+    composite_score = sharpe + diversification_weight * ln(diversification_ratio), where
+    diversification_ratio = sum(w_i * sigma_i) / sigma_p uses the portfolio's actual weights
+    (ln(DR) = 0 for a single asset or perfectly correlated assets).
+
+    `excluded` maps tickers left out by the caller (e.g. leveraged / inverse ETFs) to a reason.
+    """
+    excluded = dict(excluded or {})
+    # de-dup tickers while preserving order, without the excluded ones
     seen: set = set()
     uniq_tickers: list[str] = []
     for t in tickers:
-        if t and t not in seen:
+        if t and t not in seen and t not in excluded:
             seen.add(t)
             uniq_tickers.append(t)
 
@@ -362,6 +374,7 @@ def run_portfolio_sampler(
         round(float(min_weight), 6),
         optimization,
         int(seed),
+        round(float(min_history_coverage), 4),
         end_ts.date().isoformat(),
     )
     cached = SAMPLER_CACHE.get(cache_key)
@@ -382,17 +395,25 @@ def run_portfolio_sampler(
             f"Only {len(available)} tickers have price data, need at least {portfolio_size}"
         )
 
-    # Drop tickers with too few observations on their own
+    # Statistics must be estimated on (most of) the requested window, not annualised from the few
+    # months a recently listed ETF has traded: require min_history_coverage of its business days.
+    window_days = len(pd.bdate_range(start_ts + pd.Timedelta(days=1), end_ts))
+    min_obs = max(60, int(np.ceil(min_history_coverage * window_days)))
+
     raw = close[available]
-    # Compute per-ticker observation count after dropping NaNs on each column
-    valid_tickers = [t for t in available if raw[t].dropna().shape[0] >= 60]
+    obs_per_ticker = {t: int(raw[t].dropna().shape[0]) for t in available}
+    valid_tickers = [t for t in available if obs_per_ticker[t] >= min_obs]
+    for t in available:
+        if obs_per_ticker[t] < min_obs:
+            excluded[t] = (
+                f"History too short: {obs_per_ticker[t]} days, {min_obs} required "
+                f"({min_history_coverage:.0%} of the {lookback_period} window)"
+            )
     if len(valid_tickers) < portfolio_size:
         raise ValueError(
-            f"Only {len(valid_tickers)} tickers have >=60 daily observations, need {portfolio_size}"
+            f"Only {len(valid_tickers)} tickers have at least {min_obs} daily observations "
+            f"({min_history_coverage:.0%} of the {lookback_period} window), need {portfolio_size}"
         )
-    extra_drop = set(available) - set(valid_tickers)
-    for t in extra_drop:
-        errors[t] = "Less than 60 daily observations"
 
     # Precompute log-returns for the full universe (per-ticker NaNs preserved)
     prices_full = close[valid_tickers]
@@ -421,7 +442,8 @@ def run_portfolio_sampler(
 
         sub_tickers = [valid_tickers[i] for i in idx]
         sub_rets = log_rets_full[sub_tickers].dropna(how="any")
-        if len(sub_rets) < 20:
+        # Common dates can still be fewer than each asset's own (different exchange holidays)
+        if len(sub_rets) < min_obs:
             n_failed += 1
             continue
 
@@ -440,14 +462,16 @@ def run_portfolio_sampler(
 
         corr_mat = sub_rets.corr().to_numpy()
         avg_corr = avg_off_diag_correlation(corr_mat)
+        div_ratio = diversification_ratio(w, cov_sub)
 
-        composite = float(sharpe - float(diversification_weight) * avg_corr)
+        composite = float(sharpe + float(diversification_weight) * np.log(div_ratio))
 
         cloud.append({
             "volatility": vol,
             "expected_return": ret,
             "sharpe": sharpe,
             "avg_correlation": avg_corr,
+            "diversification_ratio": div_ratio,
             "composite_score": composite,
             "tickers": sub_tickers,
             "weights": [float(x) for x in w.tolist()],
@@ -459,7 +483,10 @@ def run_portfolio_sampler(
             "volatility": vol,
             "sharpe": sharpe,
             "avg_correlation": avg_corr,
+            "diversification_ratio": div_ratio,
             "composite_score": composite,
+            "observations": len(sub_rets),
+            "start_date_used": sub_rets.index[0].date().isoformat(),
         })
 
     if not portfolios:
@@ -480,6 +507,9 @@ def run_portfolio_sampler(
         "risk_free_rate": float(risk_free_rate),
         "diversification_weight": float(diversification_weight),
         "optimization": optimization,
+        "min_history_coverage": float(min_history_coverage),
+        "min_observations": int(min_obs),
+        "excluded": excluded,
         "top_by_composite": top_composite,
         "top_by_sharpe": top_sharpe,
         "cloud": cloud,
