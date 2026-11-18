@@ -253,6 +253,9 @@ class MonteCarloResponse(BaseModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
 
+MONTE_CARLO_MAX_POINTS = 10_000_000
+
+
 class MonteCarloRequest(BaseModel):
     tickers: list[str] = Field(min_length=1, max_length=100)
     weights: list[float] = Field(min_length=1, max_length=100)
@@ -263,6 +266,17 @@ class MonteCarloRequest(BaseModel):
     seed: int = 42
     n_sample_paths: int = Field(default=30, ge=0, le=200)
     initial_value: float = Field(default=1.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check_memory_budget(self):
+        # The service keeps every simulated path (n_simulations x horizon_days floats) to compute
+        # percentiles: cap it so a single request stays around 80 MB instead of up to 400 MB+.
+        if self.n_simulations * self.horizon_days > MONTE_CARLO_MAX_POINTS:
+            raise ValueError(
+                f"n_simulations x horizon_days must not exceed {MONTE_CARLO_MAX_POINTS:,} "
+                f"(e.g. 20,000 simulations over 500 days, or 4,000 over 2,520 days)"
+            )
+        return self
 
 
 class CorrelationPair(BaseModel):

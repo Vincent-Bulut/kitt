@@ -18,10 +18,10 @@ from backend.api.analytics.schemas import PERIODS, ReturnMode, VolFrequency
 from backend.api.cache import TTLStore
 
 # 10-minute caches (key = tickers + dates + parameters)
-PERF_CACHE = TTLStore(maxsize=5000, ttl=600)
-DRAWDOWN_CACHE = TTLStore(maxsize=2000, ttl=600)
+PERF_CACHE = TTLStore(ttl=600, max_mb=16)
+DRAWDOWN_CACHE = TTLStore(ttl=600, max_mb=64)
 
-ANNVOL_CACHE = TTLStore(maxsize=2000, ttl=600)
+ANNVOL_CACHE = TTLStore(ttl=600, max_mb=8)
 
 
 def yahoo_perf_asof(

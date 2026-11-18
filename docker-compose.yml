@@ -6,6 +6,7 @@ services:
   postgres:
     image: postgres:17
     container_name: kitt_postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -23,6 +24,7 @@ services:
   pgadmin:
     image: dpage/pgadmin4:9
     container_name: kitt_pgadmin_container
+    restart: unless-stopped
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
@@ -40,6 +42,10 @@ services:
       context: ./
       dockerfile: backend/Dockerfile
     container_name: kitt_api_container
+    restart: unless-stopped
+    # Bounded so that a runaway request can only take down the API (restarted automatically),
+    # never Postgres or the other services sharing the Docker VM.
+    mem_limit: 1536m
     # Pas de port publié : l'API n'est joignable que via nginx (http://localhost/api/)
     depends_on:
       postgres:
@@ -59,6 +65,7 @@ services:
       context: frontend
       dockerfile: Dockerfile
     container_name: kitt_frontend_container
+    restart: unless-stopped
     # Pas de port publié : servi via le reverse proxy nginx (webapp:80)
     depends_on:
       - api
@@ -66,6 +73,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     container_name: kitt_nginx_container
+    restart: unless-stopped
     ports:
       - "80:5700"
     volumes:

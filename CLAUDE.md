@@ -77,6 +77,9 @@ Images: the API image (`backend/Dockerfile`) is built from the project root with
 - **Concurrency rules** (endpoints are sync `def`, so FastAPI runs them in parallel threads):
   - Never call `yfinance` directly: go through `backend/api/yahoo_client.py` (`download`, `history`, `quote_currency`). yfinance keeps results in module-level state that concurrent calls overwrite; the client serialises calls behind a lock. `test_concurrency.py` reproduces the race.
   - Never use a bare `cachetools.TTLCache` or the `if key in cache: return cache[key]` idiom: use `backend/api/cache.py::TTLStore` (`get` / `set` under a lock).
+- **Memory rules** (the API container is limited to 1.5 GB, `restart: unless-stopped`):
+  - Caches of analytics results are bounded in estimated MB (`TTLStore(ttl=..., max_mb=...)`, ~256 MB in total), not in entries: one result weighs 1 KB to several MB.
+  - Never allocate `n_sims x horizon x n_assets` arrays at once: `quant/simulation.py` works in chunks (bit-identical results). `MonteCarloRequest` caps `n_simulations x horizon_days` at 10M points.
   - `transactions.py` — Transaction CRUD and the computed positions view (weighted-average cost, P&L) (`/portfolios/{id}/…`, `/transactions/…`)
 - **DB layer**: SQLAlchemy ORM. `database.py` builds the connection URL from `DATABASE_USER/PASSWORD/HOST/PORT/NAME` (defaults: `localhost:5433`, the dev DB); Docker Compose overrides them to target the `postgres` service. Models live in `model.py` (Portfolio → Positions → Assets). Pydantic schemas in `schema.py`.
 - **`utils.py`**: single helper `convert_to_timestamp()` used across analytics routes to normalise date strings.

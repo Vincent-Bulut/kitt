@@ -19,8 +19,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=backend/pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --no-dev
 
-# Utilisateur non-root pour exécuter l'API
-RUN useradd --system --no-create-home --uid 1001 app
+# Utilisateur non-root pour exécuter l'API. Son dossier personnel héberge le cache
+# de yfinance (~/.cache/py-yfinance : cookies et fuseaux horaires des tickers)
+RUN useradd --system --create-home --uid 1001 app
 
 # Copie le code source (.env exclu via .dockerignore : les secrets sont fournis
 # au runtime par docker-compose via ses variables d'environnement)

@@ -19,11 +19,11 @@ from backend.api.analytics.quant.optimization import (
 )
 from backend.api.cache import TTLStore
 
-EF_CACHE = TTLStore(maxsize=200, ttl=600)
+EF_CACHE = TTLStore(ttl=600, max_mb=16)
 
-SAMPLER_CACHE = TTLStore(maxsize=100, ttl=600)
+SAMPLER_CACHE = TTLStore(ttl=600, max_mb=16)
 
-BL_CACHE = TTLStore(maxsize=200, ttl=600)
+BL_CACHE = TTLStore(ttl=600, max_mb=8)
 
 
 def run_efficient_frontier(
